@@ -1,0 +1,28 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v2",
+    "name": "Production File Exporter",
+    "description": "一键导出生产文件：GERBER、丝印图、坐标文件与BOM",
+    "description_full": "这是一个 KiCad PCB 插件，可一键导出生产文件。兼容 KiCad 8.0 ~ 10.0+。",
+    "identifier": "com.github.lwh.kicad-production-exporter",
+    "type": "plugin",
+    "author": {
+        "name": "LWH",
+        "contact": {
+            "web": "https://github.com/lwh/kicad-production-exporter"
+        }
+    },
+    "license": "MIT",
+    "resources": {
+        "homepage": "https://github.com/lwh/kicad-production-exporter"
+    },
+    "versions": [
+        {
+            "version": "1.0.0",
+            "status": "stable",
+            "kicad_version": "8.0",
+            "kicad_version_max": "11.99",
+            "runtime": "swig",
+            "install_size": 25000
+        }
+    ]
+}

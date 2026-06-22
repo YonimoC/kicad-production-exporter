@@ -1,0 +1,4 @@
+# openpyxl 用于将 BOM CSV 转为格式化的 XLSX 文件
+# 安装: pip install openpyxl
+# 若未安装，BOM 将保留为 CSV 格式，不影响其他功能
+openpyxl>=3.0.0

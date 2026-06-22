@@ -1,0 +1,12 @@
+# Build artifacts
+*.zip
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+*.egg-info/
+dist/
