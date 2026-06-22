@@ -3,17 +3,17 @@
     "name": "Production File Exporter",
     "description": "一键导出生产文件：GERBER、丝印图、坐标文件与BOM",
     "description_full": "这是一个 KiCad PCB 插件，可一键导出生产文件。兼容 KiCad 8.0 ~ 10.0+。",
-    "identifier": "com.github.lwh.kicad-production-exporter",
+    "identifier": "com.github.Funny-233.kicad-production-exporter",
     "type": "plugin",
     "author": {
         "name": "LWH",
         "contact": {
-            "web": "https://github.com/lwh/kicad-production-exporter"
+            "web": "https://github.com/Funny-233/kicad-production-exporter"
         }
     },
     "license": "MIT",
     "resources": {
-        "homepage": "https://github.com/lwh/kicad-production-exporter"
+        "homepage": "https://github.com/Funny-233/kicad-production-exporter"
     },
     "versions": [
         {
