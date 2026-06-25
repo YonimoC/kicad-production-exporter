@@ -191,21 +191,51 @@ class ProductionExporter(pcbnew.ActionPlugin):
         wx.MessageBox(message, title, wx.OK | wx.ICON_WARNING)
 
     def _try_cmd(self, cmd: list, description: str) -> tuple[bool, str]:
-        """执行单个命令。"""
+        """执行单个命令。kicad-cli 输出的"Warning/警告"不作为错误。"""
         print(f"[ProductionExporter] 命令: {' '.join(cmd)}")
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300,
                 creationflags=_CREATE_FLAGS
             )
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+
             if result.returncode == 0:
-                print(f"[ProductionExporter] V {description} 完成")
+                if stderr:
+                    print(f"[ProductionExporter] V {description} 完成 (有警告)")
+                else:
+                    print(f"[ProductionExporter] V {description} 完成")
                 return True, ""
-            else:
-                err = (result.stderr + result.stdout).strip() or f"返回码 {result.returncode}"
-                short_err = err[:200]
-                print(f"[ProductionExporter] X {description}: {short_err}")
-                return False, short_err
+
+            # 非零退出码，检查是否只有警告（没有真正的错误）
+            combined = (stderr + stdout).strip()
+            # 过滤掉已知的非致命警告行
+            warn_lines = []
+            real_errors = []
+            for line in combined.splitlines():
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                # 跳过时间戳 + Warning/警告 的行
+                if re.match(r'^\d+:\d+:\d+:\s*(Warning|警告)', line_stripped):
+                    warn_lines.append(line_stripped)
+                    continue
+                # 跳过纯 library table 警告
+                if 'Library table' in line_stripped and ('UNINITIALIZED' in line_stripped or 'skipping' in line_stripped):
+                    warn_lines.append(line_stripped)
+                    continue
+                real_errors.append(line_stripped)
+
+            if not real_errors and warn_lines:
+                # 只有警告，没有真正的错误 → 视作成功
+                print(f"[ProductionExporter] V {description} 完成 (忽略 {len(warn_lines)} 条警告)")
+                return True, ""
+
+            err = "\n".join(real_errors) or f"返回码 {result.returncode}"
+            short_err = err[:200]
+            print(f"[ProductionExporter] X {description}: {short_err}")
+            return False, short_err
         except FileNotFoundError:
             return False, "找不到 kicad-cli"
         except subprocess.TimeoutExpired:
