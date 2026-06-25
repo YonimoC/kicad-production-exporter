@@ -17,6 +17,14 @@
     },
     "versions": [
         {
+            "version": "1.1.0",
+            "status": "stable",
+            "kicad_version": "8.0",
+            "kicad_version_max": "11.99",
+            "runtime": "swig",
+            "install_size": 30000
+        },
+        {
             "version": "1.0.0",
             "status": "stable",
             "kicad_version": "8.0",

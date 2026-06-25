@@ -157,8 +157,20 @@ class ProductionExporter(pcbnew.ActionPlugin):
             return
         dlg.Destroy()
 
-        # ---- 4. 执行导出 ----
-        self._do_export(board_path, output_root, project_name, ver)
+        # ---- 4. 执行导出（带进度条）----
+        total = 9  # GERBER/钻孔/丝印*2/坐标/BOM/3D*2/STEP
+        dlg = wx.ProgressDialog(
+            "导出生产文件", "准备中...", maximum=total,
+            style=wx.PD_AUTO_HIDE | wx.PD_APP_MODAL | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME)
+        dlg.SetSize(450, 180)
+
+        def on_progress(step: int, desc: str):
+            dlg.Update(step, f"[{step}/{total}] {desc}")
+
+        try:
+            self._do_export(board_path, output_root, project_name, ver, on_progress, total)
+        finally:
+            dlg.Destroy()
 
     # ================================================================
     #  内部方法
@@ -281,18 +293,18 @@ class ProductionExporter(pcbnew.ActionPlugin):
     # ================================================================
 
     def _do_export(self, board_path: str, output_root: str, project_name: str,
-                   kicad_ver: tuple):
+                   kicad_ver: tuple, on_progress, total: int):
         """根据 KiCad 版本选择对应的导出方法。"""
         if kicad_ver[0] < 9:
-            self._do_export_v8(board_path, output_root, project_name)
+            self._do_export_v8(board_path, output_root, project_name, on_progress, total)
         else:
-            self._do_export_v9(board_path, output_root, project_name, kicad_ver)
+            self._do_export_v9(board_path, output_root, project_name, kicad_ver, on_progress, total)
 
     # ----------------------------------------------------------------
     #  KiCad 8 导出
     # ----------------------------------------------------------------
     def _do_export_v8(self, board_path: str, output_root: str,
-                      project_name: str):
+                      project_name: str, on_progress, total: int):
         """KiCad 8.x 导出命令（短标志风格）。"""
         cli = find_kicad_cli()
         bf = Path(board_path)
@@ -315,6 +327,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 return False, str(e)[:200]
 
         # -- GERBER --
+        on_progress(1, "正在导出 GERBER 文件...")
         layers = self._get_gerber_layers()
         ok, err = self._try_cmd(
             [cli, "pcb", "export", "gerbers",
@@ -335,12 +348,16 @@ class ProductionExporter(pcbnew.ActionPlugin):
         results.append(("GERBER 文件", ok, err))
 
         # -- 钻孔 --
+        on_progress(2, "正在导出钻孔文件...")
         ok, err = run([cli, "pcb", "export", "drill", "-o", gdir, str(bf)],
                       "钻孔文件导出")
         results.append(("钻孔文件", ok, err))
 
         # -- 丝印 PDF (K8: 增强优先-黑白镜像，失败则基础) --
+        silk_step = 3
         for side, cn in [("F", "顶层"), ("B", "底层")]:
+            on_progress(silk_step, f"正在导出{cn}丝印图...")
+            silk_step += 1
             out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
             is_bot = (side == "B")
             cmd_enhanced = [cli, "pcb", "export", "pdf",
@@ -356,6 +373,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
             results.append((f"{cn}丝印图 (PDF)", ok, err))
 
         # -- 坐标 --
+        on_progress(5, "正在导出坐标文件...")
         ok, err = run([cli, "pcb", "export", "pos",
                        "-o", os.path.join(cdir, f"{project_name}_坐标.csv"),
                        "--format", "csv", "--units", "mm", str(bf)],
@@ -363,6 +381,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         results.append(("坐标文件 (CSV)", ok, err))
 
         # -- BOM --
+        on_progress(6, "正在导出 BOM...")
         if sch.exists():
             self._bom_export(cli, sch, output_root, project_name, True, results)
         else:
@@ -373,6 +392,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         results.append(("3D 底层视图 (PNG)", False, "需 KiCad 9+"))
 
         # -- 3D STEP --
+        on_progress(total, "正在导出 3D STEP 模型...")
         ok, err = run([cli, "pcb", "export", "step",
                        "-o", os.path.join(sdir, f"{project_name}_3D.step"),
                        str(bf)], "3D STEP 模型")
@@ -384,7 +404,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
     #  KiCad 9+ 导出
     # ----------------------------------------------------------------
     def _do_export_v9(self, board_path: str, output_root: str,
-                      project_name: str, kicad_ver: tuple):
+                      project_name: str, kicad_ver: tuple, on_progress, total: int):
         """KiCad 9.x+ 导出命令（长标志风格，3D 渲染）。"""
         cli = find_kicad_cli(kicad_ver)
         bf = Path(board_path)
@@ -407,6 +427,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 return False, str(e)[:200]
 
         # -- GERBER --
+        on_progress(1, "正在导出 GERBER 文件...")
         layers = self._get_gerber_layers()
         ok, err = self._try_cmd(
             [cli, "pcb", "export", "gerbers",
@@ -427,12 +448,16 @@ class ProductionExporter(pcbnew.ActionPlugin):
         results.append(("GERBER 文件", ok, err))
 
         # -- 钻孔 --
+        on_progress(2, "正在导出钻孔文件...")
         ok, err = run([cli, "pcb", "export", "drill", "-o", gdir, str(bf)],
                       "钻孔文件导出")
         results.append(("钻孔文件", ok, err))
 
         # -- 丝印 PDF (K9+: pcb export pdf 更稳定，pcb plot 做备选) --
+        silk_step = 3
         for side, cn in [("F", "顶层"), ("B", "底层")]:
+            on_progress(silk_step, f"正在导出{cn}丝印图...")
+            silk_step += 1
             out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
             is_bot = (side == "B")
             cmd_enhanced = [cli, "pcb", "export", "pdf",
@@ -448,6 +473,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
             results.append((f"{cn}丝印图 (PDF)", ok, err))
 
         # -- 坐标 --
+        on_progress(5, "正在导出坐标文件...")
         ok, err = run([cli, "pcb", "export", "pos",
                        "--output", os.path.join(cdir, f"{project_name}_坐标.csv"),
                        "--format", "csv", "--units", "mm", str(bf)],
@@ -455,13 +481,17 @@ class ProductionExporter(pcbnew.ActionPlugin):
         results.append(("坐标文件 (CSV)", ok, err))
 
         # -- BOM --
+        on_progress(6, "正在导出 BOM...")
         if sch.exists():
             self._bom_export(cli, sch, output_root, project_name, False, results)
         else:
             results.append(("BOM 物料清单", False, "未找到原理图"))
 
         # -- 3D 视图 (K9+: pcb render 真3D) --
+        td_step = 7
         for side, cn in [("top", "顶层"), ("bottom", "底层")]:
+            on_progress(td_step, f"正在导出3D{cn}视图...")
+            td_step += 1
             out = os.path.join(sdir, f"{project_name}_3D_{cn}.png")
             ok, err = self._run_with_fallback(
                 [cli, "pcb", "render",
@@ -474,6 +504,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
             results.append((f"3D {cn}视图 (PNG)", ok, err))
 
         # -- 3D STEP --
+        on_progress(total, "正在导出 3D STEP 模型...")
         ok, err = run([cli, "pcb", "export", "step",
                        "-o", os.path.join(sdir, f"{project_name}_3D.step"),
                        str(bf)], "3D STEP 模型")
