@@ -344,12 +344,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
             out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
             is_bot = (side == "B")
             cmd_enhanced = [cli, "pcb", "export", "pdf",
-                            "-l", f"{side}.Silkscreen,Edge.Cuts",
+                            "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
                             "--black-and-white",
                             *(["--mirror"] if is_bot else []),
                             "-o", out, str(bf)]
             cmd_base = [cli, "pcb", "export", "pdf",
-                        "-l", f"{side}.Silkscreen,Edge.Cuts",
+                        "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
                         "-o", out, str(bf)]
             ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
                                               f"{cn}丝印图")
@@ -436,12 +436,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
             out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
             is_bot = (side == "B")
             cmd_enhanced = [cli, "pcb", "export", "pdf",
-                            "-l", f"{side}.Silkscreen,Edge.Cuts",
+                            "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
                             "--black-and-white",
                             *(["--mirror"] if is_bot else []),
                             "-o", out, str(bf)]
             cmd_base = [cli, "pcb", "export", "pdf",
-                        "-l", f"{side}.Silkscreen,Edge.Cuts",
+                        "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
                         "-o", out, str(bf)]
             ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
                                               f"{cn}丝印图")
