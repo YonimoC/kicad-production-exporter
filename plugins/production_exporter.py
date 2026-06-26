@@ -139,10 +139,25 @@ class ProductionExporter(pcbnew.ActionPlugin):
             return  # 用户取消了
 
         # ---- 3. 确认导出 ----
+        # 提前获取板层信息用于显示
+        copper_count, copper_names = self._get_copper_info()
+        # 格式化铜层列表（每行不超过 ~80 字符，多了就换行）
+        cu_str = ", ".join(copper_names)
+        all_layers = copper_names + [
+            "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen",
+            "F.Mask", "B.Mask", "Edge.Cuts"
+        ]
+        layer_summary = (
+            f"识别为 {copper_count}层板\n"
+            f"  铜层({copper_count}): {cu_str}\n"
+            f"  GERBER 共导出 {len(all_layers)} 层"
+        )
+
         mode = f"KiCad {ver[0]}.{ver[1]}" + (" (K8模式)" if ver[0] < 9 else " (K9+模式)")
         dlg = wx.MessageDialog(
             None,
             f"将导出以下内容到:\n{output_root}\n\n"
+            f"{layer_summary}\n\n"
             f"检测版本: {mode}\n\n"
             f"  ├── {project_name}_Gerber/          (GERBER + 钻孔)\n"
             f"  ├── {project_name}_丝印与3D图/      (丝印图 + 3D视图 + 3D STEP)\n"
@@ -215,9 +230,9 @@ class ProductionExporter(pcbnew.ActionPlugin):
 
             if result.returncode == 0:
                 if stderr:
-                    print(f"[ProductionExporter] V {description} 完成 (有警告)")
+                    print(f"[ProductionExporter] ✅ {description} 完成 (有警告)")
                 else:
-                    print(f"[ProductionExporter] V {description} 完成")
+                    print(f"[ProductionExporter] ✅ {description} 完成")
                 return True, ""
 
             # 非零退出码，检查是否只有警告（没有真正的错误）
@@ -241,12 +256,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
 
             if not real_errors and warn_lines:
                 # 只有警告，没有真正的错误 → 视作成功
-                print(f"[ProductionExporter] V {description} 完成 (忽略 {len(warn_lines)} 条警告)")
+                print(f"[ProductionExporter] ✅ {description} 完成 (忽略 {len(warn_lines)} 条警告)")
                 return True, ""
 
             err = "\n".join(real_errors) or f"返回码 {result.returncode}"
             short_err = err[:200]
-            print(f"[ProductionExporter] X {description}: {short_err}")
+            print(f"[ProductionExporter] ❌ {description}: {short_err}")
             return False, short_err
         except FileNotFoundError:
             return False, "找不到 kicad-cli"
@@ -265,21 +280,26 @@ class ProductionExporter(pcbnew.ActionPlugin):
         ok2, err2 = self._try_cmd(fallback, description + " (备选)")
         return ok2, err2
 
-    def _get_gerber_layers(self) -> str:
-        """动态获取 GERBER 导出所需的全部图层（含所有铜层）。"""
-        layers = []
+    def _get_copper_info(self) -> tuple[int, list]:
+        """检测当前 PCB 的铜层信息，返回 (铜层数, [铜层名列表])。"""
         try:
             board = pcbnew.GetBoard()
-            copper_count = board.GetCopperLayerCount()
-            # 铜层: F.Cu=0, In1.Cu=1, ..., B.Cu=N-1
-            for i in range(copper_count):
-                name = board.GetLayerName(i)
-                layers.append(name)
-            print(f"[ProductionExporter] 检测到 {copper_count} 层铜层: {layers}")
+            f_cu = getattr(pcbnew, 'F_Cu', 0)
+            b_cu = getattr(pcbnew, 'B_Cu', 31)
+            copper = []
+            for lid in range(f_cu, b_cu + 1):
+                # 必须同时满足：层已启用 且 是铜层（排除 F.Mask 等非铜层）
+                if board.IsLayerEnabled(lid) and pcbnew.IsCopperLayer(lid):
+                    copper.append(board.GetLayerName(lid))
+            return len(copper), copper
         except Exception as e:
-            print(f"[ProductionExporter] 铜层检测失败，使用默认: {e}")
-            layers = ["F.Cu", "B.Cu"]
+            print(f"[ProductionExporter] 铜层检测失败: {e}")
+            return 2, ["F.Cu", "B.Cu"]
 
+    def _get_gerber_layers(self) -> str:
+        """动态获取 GERBER 导出所需的全部图层（含所有铜层）。"""
+        _, copper_names = self._get_copper_info()
+        layers = list(copper_names)
         layers.extend([
             "F.Paste", "B.Paste",
             "F.Silkscreen", "B.Silkscreen",
@@ -573,7 +593,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         lines.append(f"  共 {total} 项  成功 {success}  失败 {failed}")
         lines.append("=" * 50)
         for desc, ok, err in results:
-            status = "V" if ok else "X"
+            status = "✅" if ok else "❌"
             line = f"  {status}  {desc}"
             if err:
                 line += f"  [{err}]"

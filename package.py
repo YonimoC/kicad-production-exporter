@@ -51,7 +51,7 @@ def update_metadata_with_hash(metadata_path: str, sha256: str, size: int):
     """将 SHA256 和文件大小写入 metadata.json（用于仓库提交）。"""
     import json
     path = Path(metadata_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
 
     for ver in data.get("versions", []):
         ver["download_sha256"] = sha256
