@@ -83,11 +83,15 @@ def main():
     sha256 = create_zip(str(script_dir), str(output_zip))
 
     if args.update_metadata:
-        update_metadata_with_hash(
-            str(script_dir / "metadata.json"),
-            sha256,
-            output_zip.stat().st_size
-        )
+        try:
+            update_metadata_with_hash(
+                str(script_dir / "metadata.json"),
+                sha256,
+                output_zip.stat().st_size
+            )
+        except Exception as e:
+            print(f"  ⚠ 更新 metadata 失败（不影响打包）: {e}")
+            print(f"  → 可手动填入: sha256={sha256} size={output_zip.stat().st_size}")
 
     if args.install:
         # 复制到 KiCad PCM 缓存，方便直接安装

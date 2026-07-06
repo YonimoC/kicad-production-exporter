@@ -280,6 +280,21 @@ class ProductionExporter(pcbnew.ActionPlugin):
         ok2, err2 = self._try_cmd(fallback, description + " (备选)")
         return ok2, err2
 
+    def _try_drill_export(self, cli: str, gdir: str, board_path: str) -> tuple[bool, str]:
+        """钻孔导出：优先分离 PTH/NPTH，不支持则兜底合并。"""
+        # --excellon-separate-th 是 KiCad 官方标志（从 8.0 起支持）
+        ok, err = self._try_cmd(
+            [cli, "pcb", "export", "drill",
+             "--excellon-separate-th", "-o", gdir, board_path],
+            "钻孔 (分离PTH/NPTH)")
+        if ok:
+            return True, ""
+        # 不支持分离则兜底
+        ok2, err2 = self._try_cmd(
+            [cli, "pcb", "export", "drill", "-o", gdir, board_path],
+            "钻孔 (不分离)")
+        return ok2, err2
+
     def _get_copper_info(self) -> tuple[int, list]:
         """检测当前 PCB 的铜层信息，返回 (铜层数, [铜层名列表])。"""
         try:
@@ -367,11 +382,10 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 if ok3: ok, err = True, ""
         results.append(("GERBER 文件", ok, err))
 
-        # -- 钻孔 --
+        # -- 钻孔 (区分 PTH/NPTH) --
         on_progress(2, "正在导出钻孔文件...")
-        ok, err = run([cli, "pcb", "export", "drill", "-o", gdir, str(bf)],
-                      "钻孔文件导出")
-        results.append(("钻孔文件", ok, err))
+        ok, err = self._try_drill_export(cli, gdir, str(bf))
+        results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
         # -- 丝印 PDF (K8: 增强优先-黑白镜像，失败则基础) --
         silk_step = 3
@@ -467,11 +481,10 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 if ok3: ok, err = True, ""
         results.append(("GERBER 文件", ok, err))
 
-        # -- 钻孔 --
+        # -- 钻孔 (区分 PTH/NPTH) --
         on_progress(2, "正在导出钻孔文件...")
-        ok, err = run([cli, "pcb", "export", "drill", "-o", gdir, str(bf)],
-                      "钻孔文件导出")
-        results.append(("钻孔文件", ok, err))
+        ok, err = self._try_drill_export(cli, gdir, str(bf))
+        results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
         # -- 丝印 PDF (K9+: pcb export pdf 更稳定，pcb plot 做备选) --
         silk_step = 3
@@ -542,31 +555,55 @@ class ProductionExporter(pcbnew.ActionPlugin):
         bom_csv = os.path.join(output_root, f"bom-{project_name}.csv")
         flag = "-o" if is_v8 else "--output"
 
-        # QUANTITY 必须在 Footprint 之后（KiCad 默认字段顺序），否则不计算
-        ok, err = self._try_cmd(
-            [cli, "sch", "export", "bom",
-             "--fields", "Reference,Value,Footprint,QUANTITY,Description,PartNumber",
-             "--labels", "Refs,Value,Footprint,Qty,Description,PartNumber",
-             "--group-by", "Value,Footprint",
-             flag, bom_csv, str(sch)],
-            "BOM 导出")
-        if not ok or not os.path.exists(bom_csv):
-            # 备选1: 不带 --group-by
-            ok2, _ = self._try_cmd(
+        # K8 不支持 QUANTITY 字段，需手动通过 _count_refs 计算数量
+        if is_v8:
+            ok, err = self._try_cmd(
                 [cli, "sch", "export", "bom",
                  "--fields", "Reference,Value,Footprint,Description,PartNumber",
                  "--labels", "Refs,Value,Footprint,Description,PartNumber",
+                 "--group-by", "Value,Footprint",
                  flag, bom_csv, str(sch)],
-                "BOM 导出(备选1)")
-            if ok2 and os.path.exists(bom_csv):
-                ok, err = True, ""
-        if not ok or not os.path.exists(bom_csv):
-            # 备选2: 默认参数（K8 兜底）
-            ok3, err3 = self._try_cmd(
-                [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
-                "BOM 导出(备选2)")
-            if ok3 and os.path.exists(bom_csv):
-                ok, err = True, ""
+                "BOM 导出")
+            if not ok or not os.path.exists(bom_csv):
+                ok2, _ = self._try_cmd(
+                    [cli, "sch", "export", "bom",
+                     "--fields", "Reference,Value,Footprint,Description,PartNumber",
+                     "--labels", "Refs,Value,Footprint,Description,PartNumber",
+                     flag, bom_csv, str(sch)],
+                    "BOM 导出(备选1)")
+                if ok2 and os.path.exists(bom_csv):
+                    ok, err = True, ""
+            if not ok or not os.path.exists(bom_csv):
+                ok3, err3 = self._try_cmd(
+                    [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
+                    "BOM 导出(备选2)")
+                if ok3 and os.path.exists(bom_csv):
+                    ok, err = True, ""
+        else:
+            # K9+: 支持 QUANTITY 字段自动计算数量
+            ok, err = self._try_cmd(
+                [cli, "sch", "export", "bom",
+                 "--fields", "Reference,Value,Footprint,QUANTITY,Description,PartNumber",
+                 "--labels", "Refs,Value,Footprint,Qty,Description,PartNumber",
+                 "--group-by", "Value,Footprint",
+                 flag, bom_csv, str(sch)],
+                "BOM 导出")
+            if not ok or not os.path.exists(bom_csv):
+                ok2, _ = self._try_cmd(
+                    [cli, "sch", "export", "bom",
+                     "--fields", "Reference,Value,Footprint,Description,PartNumber",
+                     "--labels", "Refs,Value,Footprint,Description,PartNumber",
+                     "--group-by", "Value,Footprint",
+                     flag, bom_csv, str(sch)],
+                    "BOM 导出(备选1)")
+                if ok2 and os.path.exists(bom_csv):
+                    ok, err = True, ""
+            if not ok or not os.path.exists(bom_csv):
+                ok3, err3 = self._try_cmd(
+                    [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
+                    "BOM 导出(备选2)")
+                if ok3 and os.path.exists(bom_csv):
+                    ok, err = True, ""
 
         if ok and os.path.exists(bom_csv):
             xlsx = os.path.join(output_root, f"bom-{project_name}.xlsx")
@@ -683,7 +720,9 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 if not row or all(c == "" for c in row):
                     continue
                 refs = get(row, idx_ref)
-                qty = get(row, idx_qty) if idx_qty >= 0 else str(self._count_refs(refs))
+                # Qty 列可能不存在、为空、或为 0（K8 不支持 QUANTITY 字段）
+                raw_qty = get(row, idx_qty) if idx_qty >= 0 else ""
+                qty = raw_qty if raw_qty and raw_qty != "0" else str(self._count_refs(refs))
                 ws.append([
                     get(row, idx_pn),
                     get(row, idx_desc),
