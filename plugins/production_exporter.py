@@ -133,12 +133,17 @@ class ProductionExporter(pcbnew.ActionPlugin):
 
         project_name = Path(board_path).stem
 
-        # ---- 2. 选择输出文件夹 ----
+        # ---- 2. 选择要导出的项目（默认全选）----
+        export_items = self._select_export_items(ver)
+        if not export_items:
+            return  # 用户取消了
+
+        # ---- 3. 选择输出文件夹 ----
         output_root = self._select_output_folder()
         if not output_root:
             return  # 用户取消了
 
-        # ---- 3. 确认导出 ----
+        # ---- 4. 确认导出 ----
         # 提前获取板层信息用于显示
         copper_count, copper_names = self._get_copper_info()
         # 格式化铜层列表（每行不超过 ~80 字符，多了就换行）
@@ -154,15 +159,21 @@ class ProductionExporter(pcbnew.ActionPlugin):
         )
 
         mode = f"KiCad {ver[0]}.{ver[1]}" + (" (K8模式)" if ver[0] < 9 else " (K9+模式)")
+        # 统计选中项目
+        selected_names = [n for n, sel in export_items.items() if sel]
+        items_str = "\n".join(f"  ├── {n}" for n in selected_names[:-1]) if len(selected_names) > 1 else ""
+        if len(selected_names) > 1:
+            items_str += f"\n  └── {selected_names[-1]}"
+        elif selected_names:
+            items_str = f"  └── {selected_names[0]}"
+
         dlg = wx.MessageDialog(
             None,
             f"将导出以下内容到:\n{output_root}\n\n"
             f"{layer_summary}\n\n"
-            f"检测版本: {mode}\n\n"
-            f"  ├── {project_name}_Gerber/          (GERBER + 钻孔)\n"
-            f"  ├── {project_name}_丝印与3D图/      (丝印图 + 3D视图 + 3D STEP)\n"
-            f"  ├── {project_name}_坐标文件/        (Pick & Place)\n"
-            f"  └── bom-{project_name}.xlsx         (BOM 物料清单)\n\n"
+            f"检测版本: {mode}\n"
+            f"选中项目 ({len(selected_names)}):\n"
+            f"{items_str}\n\n"
             f"是否继续？",
             "确认导出",
             wx.YES_NO | wx.ICON_QUESTION
@@ -172,8 +183,11 @@ class ProductionExporter(pcbnew.ActionPlugin):
             return
         dlg.Destroy()
 
-        # ---- 4. 执行导出（带进度条）----
-        total = 9  # GERBER/钻孔/丝印*2/坐标/BOM/3D*2/STEP
+        # ---- 5. 执行导出（带进度条）----
+        selected_count = sum(1 for sel in export_items.values() if sel)
+        total = selected_count
+        if total == 0:
+            return
         dlg = wx.ProgressDialog(
             "导出生产文件", "准备中...", maximum=total,
             style=wx.PD_AUTO_HIDE | wx.PD_APP_MODAL | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME)
@@ -183,13 +197,94 @@ class ProductionExporter(pcbnew.ActionPlugin):
             dlg.Update(step, f"[{step}/{total}] {desc}")
 
         try:
-            self._do_export(board_path, output_root, project_name, ver, on_progress, total)
+            self._do_export(board_path, output_root, project_name, ver, export_items, on_progress, total)
         finally:
             dlg.Destroy()
 
     # ================================================================
     #  内部方法
     # ================================================================
+
+    def _select_export_items(self, kicad_ver: tuple) -> dict | None:
+        """弹出导出项目选择对话框，返回 {项目名: 是否选中} 或 None（取消）。"""
+        # 定义所有可选导出项目
+        all_items = [
+            ("GERBER 文件", True),
+            ("钻孔文件 (PTH+NPTH)", True),
+            ("顶层丝印图 (PDF)", True),
+            ("底层丝印图 (PDF)", True),
+            ("坐标文件 (CSV)", True),
+            ("BOM 物料清单 (XLSX)", True),
+        ]
+        if kicad_ver[0] >= 9:
+            all_items += [
+                ("3D 顶层视图 (PNG)", True),
+                ("3D 底层视图 (PNG)", True),
+            ]
+        all_items.append(("3D STEP 模型", True))
+
+        # 构建自定义对话框
+        dlg = wx.Dialog(None, title="选择导出项目",
+                        size=(380, 420),
+                        style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        panel = wx.Panel(dlg)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        title = wx.StaticText(panel, label="请选择要导出的项目：")
+        title_font = title.GetFont()
+        title_font.SetWeight(wx.FONTWEIGHT_BOLD)
+        title.SetFont(title_font)
+        vbox.Add(title, 0, wx.ALL, 10)
+
+        checkboxes = []
+        for name, default in all_items:
+            cb = wx.CheckBox(panel, label=name)
+            cb.SetValue(default)
+            checkboxes.append(cb)
+            vbox.Add(cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 20)
+
+        # 全选/全不选按钮
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        btn_all = wx.Button(panel, label="全选")
+        btn_none = wx.Button(panel, label="全不选")
+        btn_sizer.Add(btn_all, 0, wx.RIGHT, 10)
+        btn_sizer.Add(btn_none, 0)
+        vbox.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, 20)
+
+        def on_select_all(e):
+            for cb in checkboxes:
+                cb.SetValue(True)
+
+        def on_select_none(e):
+            for cb in checkboxes:
+                cb.SetValue(False)
+
+        btn_all.Bind(wx.EVT_BUTTON, on_select_all)
+        btn_none.Bind(wx.EVT_BUTTON, on_select_none)
+
+        # 确定/取消
+        btn_ok = wx.Button(panel, wx.ID_OK, "确定")
+        btn_cancel = wx.Button(panel, wx.ID_CANCEL, "取消")
+        ok_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ok_sizer.AddStretchSpacer()
+        ok_sizer.Add(btn_ok, 0, wx.RIGHT, 10)
+        ok_sizer.Add(btn_cancel, 0)
+        vbox.Add(ok_sizer, 0, wx.ALL | wx.EXPAND, 15)
+
+        panel.SetSizer(vbox)
+        dlg.Fit()
+        dlg.CenterOnScreen()
+
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return None
+        dlg.Destroy()
+
+        # 构建返回结果
+        result = {}
+        for (name, _), cb in zip(all_items, checkboxes):
+            result[name] = cb.GetValue()
+        return result
 
     def _select_output_folder(self) -> str | None:
         """弹出文件夹选择对话框，返回所选路径或 None。"""
@@ -216,6 +311,18 @@ class ProductionExporter(pcbnew.ActionPlugin):
     def _show_warning(self, title: str, message: str):
         """警告提示框。"""
         wx.MessageBox(message, title, wx.OK | wx.ICON_WARNING)
+
+    def _get_logger(self, output_root: str):
+        """返回一个日志函数，写入输出目录下的 _export.log。"""
+        log_path = os.path.join(output_root, "_export.log")
+        def log(msg: str):
+            try:
+                timestamp = __import__('datetime').datetime.now().strftime("%H:%M:%S")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{timestamp}] {msg}\n")
+            except Exception:
+                pass
+        return log
 
     def _try_cmd(self, cmd: list, description: str) -> tuple[bool, str]:
         """执行单个命令。kicad-cli 输出的"Warning/警告"不作为错误。"""
@@ -299,22 +406,33 @@ class ProductionExporter(pcbnew.ActionPlugin):
         """检测当前 PCB 的铜层信息，返回 (铜层数, [铜层名列表])。"""
         try:
             board = pcbnew.GetBoard()
-            f_cu = getattr(pcbnew, 'F_Cu', 0)
-            b_cu = getattr(pcbnew, 'B_Cu', 31)
+            count = board.GetCopperLayerCount()
             copper = []
-            for lid in range(f_cu, b_cu + 1):
-                # 必须同时满足：层已启用 且 是铜层（排除 F.Mask 等非铜层）
-                if board.IsLayerEnabled(lid) and pcbnew.IsCopperLayer(lid):
-                    copper.append(board.GetLayerName(lid))
+            for i in range(count):
+                # 铜层 ID: F_Cu(0) ... In(N-2)_Cu(N-2), B_Cu(31)
+                # 内层连续递增，底层是固定的 B_Cu
+                lid = pcbnew.B_Cu if i == count - 1 else pcbnew.F_Cu + i
+                copper.append(board.GetLayerName(lid))
             return len(copper), copper
         except Exception as e:
             print(f"[ProductionExporter] 铜层检测失败: {e}")
             return 2, ["F.Cu", "B.Cu"]
 
     def _get_gerber_layers(self) -> str:
-        """动态获取 GERBER 导出所需的全部图层（含所有铜层）。"""
+        """动态获取 GERBER 导出所需的全部图层（含所有铜层）。
+        使用 kicad-cli 识别的规范层名，而非 board.GetLayerName() 可能返回的用户自定义名。"""
         _, copper_names = self._get_copper_info()
-        layers = list(copper_names)
+        # 强制使用 kicad-cli 标准层名（规避用户重命名导致 kicad-cli 不识别）
+        canonical_copper = []
+        count = len(copper_names)
+        for i in range(count):
+            if i == 0:
+                canonical_copper.append("F.Cu")
+            elif i == count - 1:
+                canonical_copper.append("B.Cu")
+            else:
+                canonical_copper.append(f"In{i}.Cu")
+        layers = list(canonical_copper)
         layers.extend([
             "F.Paste", "B.Paste",
             "F.Silkscreen", "B.Silkscreen",
@@ -328,18 +446,18 @@ class ProductionExporter(pcbnew.ActionPlugin):
     # ================================================================
 
     def _do_export(self, board_path: str, output_root: str, project_name: str,
-                   kicad_ver: tuple, on_progress, total: int):
+                   kicad_ver: tuple, export_items: dict, on_progress, total: int):
         """根据 KiCad 版本选择对应的导出方法。"""
         if kicad_ver[0] < 9:
-            self._do_export_v8(board_path, output_root, project_name, on_progress, total)
+            self._do_export_v8(board_path, output_root, project_name, export_items, on_progress, total)
         else:
-            self._do_export_v9(board_path, output_root, project_name, kicad_ver, on_progress, total)
+            self._do_export_v9(board_path, output_root, project_name, kicad_ver, export_items, on_progress, total)
 
     # ----------------------------------------------------------------
     #  KiCad 8 导出
     # ----------------------------------------------------------------
     def _do_export_v8(self, board_path: str, output_root: str,
-                      project_name: str, on_progress, total: int):
+                      project_name: str, export_items: dict, on_progress, total: int):
         """KiCad 8.x 导出命令（短标志风格）。"""
         cli = find_kicad_cli()
         bf = Path(board_path)
@@ -361,76 +479,83 @@ class ProductionExporter(pcbnew.ActionPlugin):
             except Exception as e:
                 return False, str(e)[:200]
 
+        step = 0
+
         # -- GERBER --
-        on_progress(1, "正在导出 GERBER 文件...")
-        layers = self._get_gerber_layers()
-        ok, err = self._try_cmd(
-            [cli, "pcb", "export", "gerbers",
-             "-l", layers, "--output", gdir, str(bf)],
-            "GERBER 文件导出")
-        if not ok:
-            ok2, err2 = self._try_cmd(
+        if export_items.get("GERBER 文件", True):
+            step += 1; on_progress(step, "正在导出 GERBER 文件...")
+            layers = self._get_gerber_layers()
+            ok, err = self._try_cmd(
                 [cli, "pcb", "export", "gerbers",
-                 str(bf), "--output", gdir, "-l", layers],
-                "GERBER (板文件在前)")
-            if ok2: ok, err = True, ""
-            else:
-                ok3, err3 = self._try_cmd(
+                 "-l", layers, "--output", gdir, str(bf)],
+                "GERBER 文件导出")
+            if not ok:
+                ok2, err2 = self._try_cmd(
                     [cli, "pcb", "export", "gerbers",
-                     "--output", gdir, str(bf)],
-                    "GERBER (无层)")
-                if ok3: ok, err = True, ""
-        results.append(("GERBER 文件", ok, err))
+                     str(bf), "--output", gdir, "-l", layers],
+                    "GERBER (板文件在前)")
+                if ok2: ok, err = True, ""
+                else:
+                    ok3, err3 = self._try_cmd(
+                        [cli, "pcb", "export", "gerbers",
+                         "--output", gdir, str(bf)],
+                        "GERBER (无层)")
+                    if ok3: ok, err = True, ""
+            results.append(("GERBER 文件", ok, err))
 
-        # -- 钻孔 (区分 PTH/NPTH) --
-        on_progress(2, "正在导出钻孔文件...")
-        ok, err = self._try_drill_export(cli, gdir, str(bf))
-        results.append(("钻孔文件 (PTH+NPTH)", ok, err))
+        # -- 钻孔 --
+        if export_items.get("钻孔文件 (PTH+NPTH)", True):
+            step += 1; on_progress(step, "正在导出钻孔文件...")
+            ok, err = self._try_drill_export(cli, gdir, str(bf))
+            results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
-        # -- 丝印 PDF (K8: 增强优先-黑白镜像，失败则基础) --
-        silk_step = 3
+        # -- 丝印 PDF --
         for side, cn in [("F", "顶层"), ("B", "底层")]:
-            on_progress(silk_step, f"正在导出{cn}丝印图...")
-            silk_step += 1
-            out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
-            is_bot = (side == "B")
-            cmd_enhanced = [cli, "pcb", "export", "pdf",
+            key = f"{cn}丝印图 (PDF)"
+            if export_items.get(key, True):
+                step += 1; on_progress(step, f"正在导出{cn}丝印图...")
+                out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
+                is_bot = (side == "B")
+                cmd_enhanced = [cli, "pcb", "export", "pdf",
+                                "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
+                                "--black-and-white",
+                                *(["--mirror"] if is_bot else []),
+                                "-o", out, str(bf)]
+                cmd_base = [cli, "pcb", "export", "pdf",
                             "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                            "--black-and-white",
-                            *(["--mirror"] if is_bot else []),
                             "-o", out, str(bf)]
-            cmd_base = [cli, "pcb", "export", "pdf",
-                        "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                        "-o", out, str(bf)]
-            ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
-                                              f"{cn}丝印图")
-            results.append((f"{cn}丝印图 (PDF)", ok, err))
+                ok, err = self._run_with_fallback(cmd_enhanced, cmd_base, f"{cn}丝印图")
+                results.append((key, ok, err))
 
         # -- 坐标 --
-        on_progress(5, "正在导出坐标文件...")
-        ok, err = run([cli, "pcb", "export", "pos",
-                       "-o", os.path.join(cdir, f"{project_name}_坐标.csv"),
-                       "--format", "csv", "--units", "mm", str(bf)],
-                      "坐标文件")
-        results.append(("坐标文件 (CSV)", ok, err))
+        if export_items.get("坐标文件 (CSV)", True):
+            step += 1; on_progress(step, "正在导出坐标文件...")
+            ok, err = run([cli, "pcb", "export", "pos",
+                           "-o", os.path.join(cdir, f"{project_name}_坐标.csv"),
+                           "--format", "csv", "--units", "mm", str(bf)],
+                          "坐标文件")
+            results.append(("坐标文件 (CSV)", ok, err))
 
         # -- BOM --
-        on_progress(6, "正在导出 BOM...")
-        if sch.exists():
-            self._bom_export(cli, sch, output_root, project_name, True, results)
-        else:
-            results.append(("BOM 物料清单", False, "未找到原理图"))
+        if export_items.get("BOM 物料清单 (XLSX)", True):
+            step += 1; on_progress(step, "正在导出 BOM...")
+            if sch.exists():
+                self._bom_export(cli, sch, output_root, project_name, True, results)
+            else:
+                results.append(("BOM 物料清单", False, "未找到原理图"))
 
-        # -- 3D 视图 (K8 不支持 pcb render，跳过) --
-        results.append(("3D 顶层视图 (PNG)", False, "需 KiCad 9+"))
-        results.append(("3D 底层视图 (PNG)", False, "需 KiCad 9+"))
+        # -- 3D 视图 (K8 不支持) --
+        for key in ["3D 顶层视图 (PNG)", "3D 底层视图 (PNG)"]:
+            if export_items.get(key, True):
+                results.append((key, False, "需 KiCad 9+"))
 
         # -- 3D STEP --
-        on_progress(total, "正在导出 3D STEP 模型...")
-        ok, err = run([cli, "pcb", "export", "step",
-                       "-o", os.path.join(sdir, f"{project_name}_3D.step"),
-                       str(bf)], "3D STEP 模型")
-        results.append(("3D STEP 模型", ok, err))
+        if export_items.get("3D STEP 模型", True):
+            step += 1; on_progress(step, "正在导出 3D STEP 模型...")
+            ok, err = run([cli, "pcb", "export", "step",
+                           "-o", os.path.join(sdir, f"{project_name}_3D.step"),
+                           str(bf)], "3D STEP 模型")
+            results.append(("3D STEP 模型", ok, err))
 
         self._print_summary(results, output_root)
 
@@ -438,7 +563,8 @@ class ProductionExporter(pcbnew.ActionPlugin):
     #  KiCad 9+ 导出
     # ----------------------------------------------------------------
     def _do_export_v9(self, board_path: str, output_root: str,
-                      project_name: str, kicad_ver: tuple, on_progress, total: int):
+                      project_name: str, kicad_ver: tuple, export_items: dict,
+                      on_progress, total: int):
         """KiCad 9.x+ 导出命令（长标志风格，3D 渲染）。"""
         cli = find_kicad_cli(kicad_ver)
         bf = Path(board_path)
@@ -460,88 +586,94 @@ class ProductionExporter(pcbnew.ActionPlugin):
             except Exception as e:
                 return False, str(e)[:200]
 
+        step = 0
+
         # -- GERBER --
-        on_progress(1, "正在导出 GERBER 文件...")
-        layers = self._get_gerber_layers()
-        ok, err = self._try_cmd(
-            [cli, "pcb", "export", "gerbers",
-             "-l", layers, "--output", gdir, str(bf)],
-            "GERBER 文件导出")
-        if not ok:
-            ok2, err2 = self._try_cmd(
+        if export_items.get("GERBER 文件", True):
+            step += 1; on_progress(step, "正在导出 GERBER 文件...")
+            layers = self._get_gerber_layers()
+            ok, err = self._try_cmd(
                 [cli, "pcb", "export", "gerbers",
-                 str(bf), "--output", gdir, "-l", layers],
-                "GERBER (板文件在前)")
-            if ok2: ok, err = True, ""
-            else:
-                ok3, err3 = self._try_cmd(
+                 "-l", layers, "--output", gdir, str(bf)],
+                "GERBER 文件导出")
+            if not ok:
+                ok2, err2 = self._try_cmd(
                     [cli, "pcb", "export", "gerbers",
-                     "--output", gdir, str(bf)],
-                    "GERBER (无层)")
-                if ok3: ok, err = True, ""
-        results.append(("GERBER 文件", ok, err))
+                     str(bf), "--output", gdir, "-l", layers],
+                    "GERBER (板文件在前)")
+                if ok2: ok, err = True, ""
+                else:
+                    ok3, err3 = self._try_cmd(
+                        [cli, "pcb", "export", "gerbers",
+                         "--output", gdir, str(bf)],
+                        "GERBER (无层)")
+                    if ok3: ok, err = True, ""
+            results.append(("GERBER 文件", ok, err))
 
-        # -- 钻孔 (区分 PTH/NPTH) --
-        on_progress(2, "正在导出钻孔文件...")
-        ok, err = self._try_drill_export(cli, gdir, str(bf))
-        results.append(("钻孔文件 (PTH+NPTH)", ok, err))
+        # -- 钻孔 --
+        if export_items.get("钻孔文件 (PTH+NPTH)", True):
+            step += 1; on_progress(step, "正在导出钻孔文件...")
+            ok, err = self._try_drill_export(cli, gdir, str(bf))
+            results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
-        # -- 丝印 PDF (K9+: pcb export pdf 更稳定，pcb plot 做备选) --
-        silk_step = 3
+        # -- 丝印 PDF --
         for side, cn in [("F", "顶层"), ("B", "底层")]:
-            on_progress(silk_step, f"正在导出{cn}丝印图...")
-            silk_step += 1
-            out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
-            is_bot = (side == "B")
-            cmd_enhanced = [cli, "pcb", "export", "pdf",
+            key = f"{cn}丝印图 (PDF)"
+            if export_items.get(key, True):
+                step += 1; on_progress(step, f"正在导出{cn}丝印图...")
+                out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
+                is_bot = (side == "B")
+                cmd_enhanced = [cli, "pcb", "export", "pdf",
+                                "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
+                                "--black-and-white",
+                                *(["--mirror"] if is_bot else []),
+                                "-o", out, str(bf)]
+                cmd_base = [cli, "pcb", "export", "pdf",
                             "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                            "--black-and-white",
-                            *(["--mirror"] if is_bot else []),
                             "-o", out, str(bf)]
-            cmd_base = [cli, "pcb", "export", "pdf",
-                        "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                        "-o", out, str(bf)]
-            ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
-                                              f"{cn}丝印图")
-            results.append((f"{cn}丝印图 (PDF)", ok, err))
+                ok, err = self._run_with_fallback(cmd_enhanced, cmd_base, f"{cn}丝印图")
+                results.append((key, ok, err))
 
         # -- 坐标 --
-        on_progress(5, "正在导出坐标文件...")
-        ok, err = run([cli, "pcb", "export", "pos",
-                       "--output", os.path.join(cdir, f"{project_name}_坐标.csv"),
-                       "--format", "csv", "--units", "mm", str(bf)],
-                      "坐标文件")
-        results.append(("坐标文件 (CSV)", ok, err))
+        if export_items.get("坐标文件 (CSV)", True):
+            step += 1; on_progress(step, "正在导出坐标文件...")
+            ok, err = run([cli, "pcb", "export", "pos",
+                           "--output", os.path.join(cdir, f"{project_name}_坐标.csv"),
+                           "--format", "csv", "--units", "mm", str(bf)],
+                          "坐标文件")
+            results.append(("坐标文件 (CSV)", ok, err))
 
         # -- BOM --
-        on_progress(6, "正在导出 BOM...")
-        if sch.exists():
-            self._bom_export(cli, sch, output_root, project_name, False, results)
-        else:
-            results.append(("BOM 物料清单", False, "未找到原理图"))
+        if export_items.get("BOM 物料清单 (XLSX)", True):
+            step += 1; on_progress(step, "正在导出 BOM...")
+            if sch.exists():
+                self._bom_export(cli, sch, output_root, project_name, False, results)
+            else:
+                results.append(("BOM 物料清单", False, "未找到原理图"))
 
-        # -- 3D 视图 (K9+: pcb render 真3D) --
-        td_step = 7
+        # -- 3D 视图 --
         for side, cn in [("top", "顶层"), ("bottom", "底层")]:
-            on_progress(td_step, f"正在导出3D{cn}视图...")
-            td_step += 1
-            out = os.path.join(sdir, f"{project_name}_3D_{cn}.png")
-            ok, err = self._run_with_fallback(
-                [cli, "pcb", "render",
-                 "--side", side, "--output", out, str(bf)],
-                [cli, "pcb", "export", "pdf",
-                 "-l", (f"F.Cu,F.Mask,F.Paste,F.Silkscreen,Edge.Cuts" if side == "top"
-                        else f"B.Cu,B.Mask,B.Paste,B.Silkscreen,Edge.Cuts"),
-                 "-o", out, str(bf)],
-                f"3D {cn}视图")
-            results.append((f"3D {cn}视图 (PNG)", ok, err))
+            key = f"3D {cn}视图 (PNG)"
+            if export_items.get(key, True):
+                step += 1; on_progress(step, f"正在导出3D{cn}视图...")
+                out = os.path.join(sdir, f"{project_name}_3D_{cn}.png")
+                ok, err = self._run_with_fallback(
+                    [cli, "pcb", "render",
+                     "--side", side, "--output", out, str(bf)],
+                    [cli, "pcb", "export", "pdf",
+                     "-l", (f"F.Cu,F.Mask,F.Paste,F.Silkscreen,Edge.Cuts" if side == "top"
+                            else f"B.Cu,B.Mask,B.Paste,B.Silkscreen,Edge.Cuts"),
+                     "-o", out, str(bf)],
+                    f"3D {cn}视图")
+                results.append((key, ok, err))
 
         # -- 3D STEP --
-        on_progress(total, "正在导出 3D STEP 模型...")
-        ok, err = run([cli, "pcb", "export", "step",
-                       "-o", os.path.join(sdir, f"{project_name}_3D.step"),
-                       str(bf)], "3D STEP 模型")
-        results.append(("3D STEP 模型", ok, err))
+        if export_items.get("3D STEP 模型", True):
+            step += 1; on_progress(step, "正在导出 3D STEP 模型...")
+            ok, err = run([cli, "pcb", "export", "step",
+                           "-o", os.path.join(sdir, f"{project_name}_3D.step"),
+                           str(bf)], "3D STEP 模型")
+            results.append(("3D STEP 模型", ok, err))
 
         self._print_summary(results, output_root)
 
@@ -554,56 +686,38 @@ class ProductionExporter(pcbnew.ActionPlugin):
         """导出 BOM CSV 并转为格式化的 XLSX。"""
         bom_csv = os.path.join(output_root, f"bom-{project_name}.csv")
         flag = "-o" if is_v8 else "--output"
+        log = self._get_logger(output_root)
 
-        # K8 不支持 QUANTITY 字段，需手动通过 _count_refs 计算数量
-        if is_v8:
-            ok, err = self._try_cmd(
+        # QUANTITY/DNP 是 KiCad 内置字段（K8+ 均支持），配合 --group-by 自动按分组计数
+        # 注意：不在 CLI 中排序，由 Python 读取 CSV 后按 DNP 排序
+        ok, err = self._try_cmd(
+            [cli, "sch", "export", "bom",
+             "--fields", "Reference,Value,Footprint,QUANTITY,Description,PartNumber,DNP",
+             "--labels", "Refs,Value,Footprint,Qty,Description,PartNumber,DNP",
+             "--group-by", "Value,Footprint,DNP",
+             flag, bom_csv, str(sch)],
+            "BOM 导出")
+        log(f"BOM 主命令: ok={ok}, err={err}, csv_exists={os.path.exists(bom_csv)}")
+        if not ok or not os.path.exists(bom_csv):
+            # 备选1: 不带 QUANTITY/DNP，靠 _count_refs 手动计算
+            ok2, err2 = self._try_cmd(
                 [cli, "sch", "export", "bom",
                  "--fields", "Reference,Value,Footprint,Description,PartNumber",
                  "--labels", "Refs,Value,Footprint,Description,PartNumber",
                  "--group-by", "Value,Footprint",
                  flag, bom_csv, str(sch)],
-                "BOM 导出")
-            if not ok or not os.path.exists(bom_csv):
-                ok2, _ = self._try_cmd(
-                    [cli, "sch", "export", "bom",
-                     "--fields", "Reference,Value,Footprint,Description,PartNumber",
-                     "--labels", "Refs,Value,Footprint,Description,PartNumber",
-                     flag, bom_csv, str(sch)],
-                    "BOM 导出(备选1)")
-                if ok2 and os.path.exists(bom_csv):
-                    ok, err = True, ""
-            if not ok or not os.path.exists(bom_csv):
-                ok3, err3 = self._try_cmd(
-                    [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
-                    "BOM 导出(备选2)")
-                if ok3 and os.path.exists(bom_csv):
-                    ok, err = True, ""
-        else:
-            # K9+: 支持 QUANTITY 字段自动计算数量
-            ok, err = self._try_cmd(
-                [cli, "sch", "export", "bom",
-                 "--fields", "Reference,Value,Footprint,QUANTITY,Description,PartNumber",
-                 "--labels", "Refs,Value,Footprint,Qty,Description,PartNumber",
-                 "--group-by", "Value,Footprint",
-                 flag, bom_csv, str(sch)],
-                "BOM 导出")
-            if not ok or not os.path.exists(bom_csv):
-                ok2, _ = self._try_cmd(
-                    [cli, "sch", "export", "bom",
-                     "--fields", "Reference,Value,Footprint,Description,PartNumber",
-                     "--labels", "Refs,Value,Footprint,Description,PartNumber",
-                     "--group-by", "Value,Footprint",
-                     flag, bom_csv, str(sch)],
-                    "BOM 导出(备选1)")
-                if ok2 and os.path.exists(bom_csv):
-                    ok, err = True, ""
-            if not ok or not os.path.exists(bom_csv):
-                ok3, err3 = self._try_cmd(
-                    [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
-                    "BOM 导出(备选2)")
-                if ok3 and os.path.exists(bom_csv):
-                    ok, err = True, ""
+                "BOM 导出(备选1)")
+            log(f"BOM 备选1: ok={ok2}, err={err2}, csv_exists={os.path.exists(bom_csv)}")
+            if ok2 and os.path.exists(bom_csv):
+                ok, err = True, ""
+        if not ok or not os.path.exists(bom_csv):
+            # 备选2: 默认参数兜底
+            ok3, err3 = self._try_cmd(
+                [cli, "sch", "export", "bom", flag, bom_csv, str(sch)],
+                "BOM 导出(备选2)")
+            log(f"BOM 备选2: ok={ok3}, err={err3}, csv_exists={os.path.exists(bom_csv)}")
+            if ok3 and os.path.exists(bom_csv):
+                ok, err = True, ""
 
         if ok and os.path.exists(bom_csv):
             xlsx = os.path.join(output_root, f"bom-{project_name}.xlsx")
@@ -707,6 +821,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
             idx_qty = col("quantity", "qty", "count", "数量")
             idx_desc = col("description", "desc", "描述")
             idx_pn  = col("partnumber", "part_number", "mpn", "mfg_pn", "pn", "料号")
+            idx_dnp = col("dnp")
 
             def get(row, idx):
                 return row[idx].strip() if 0 <= idx < len(row) else ""
@@ -714,9 +829,14 @@ class ProductionExporter(pcbnew.ActionPlugin):
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "BOM"
-            ws.append(["PartNumber", "Description", "Quantity", "Designator", "Value", "Footprint"])
+            ws.append(["PartNumber", "Description", "Quantity", "Designator", "Value", "Footprint", "DNP"])
 
-            for row in rows[1:]:
+            # 按 DNP 排序：非 DNP 在前，DNP 在后
+            data_rows = rows[1:]
+            if idx_dnp >= 0:
+                data_rows.sort(key=lambda r: (get(r, idx_dnp) != "DNP", get(r, idx_ref)))
+
+            for row in data_rows:
                 if not row or all(c == "" for c in row):
                     continue
                 refs = get(row, idx_ref)
@@ -730,6 +850,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
                     refs,
                     get(row, idx_val),
                     get(row, idx_fp),
+                    get(row, idx_dnp),
                 ])
 
             # 列宽 & 表头样式
