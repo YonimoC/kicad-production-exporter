@@ -211,8 +211,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         all_items = [
             ("GERBER 文件", True),
             ("钻孔文件 (PTH+NPTH)", True),
-            ("顶层丝印图 (PDF)", True),
-            ("底层丝印图 (PDF)", True),
+            ("丝印图 (PDF 顶层+底层)", True),
             ("坐标文件 (CSV)", True),
             ("BOM 物料清单 (XLSX)", True),
         ]
@@ -313,8 +312,11 @@ class ProductionExporter(pcbnew.ActionPlugin):
         wx.MessageBox(message, title, wx.OK | wx.ICON_WARNING)
 
     def _get_logger(self, output_root: str):
-        """返回一个日志函数，写入输出目录下的 _export.log。"""
-        log_path = os.path.join(output_root, "_export.log")
+        """返回一个日志函数，写入用户主目录下的固定 log 文件（不污染导出目录）。"""
+        try:
+            log_path = os.path.join(os.path.expanduser("~"), "production_exporter.log")
+        except Exception:
+            log_path = os.path.join(output_root, "_export.log")  # 兜底
         def log(msg: str):
             try:
                 timestamp = __import__('datetime').datetime.now().strftime("%H:%M:%S")
@@ -509,23 +511,11 @@ class ProductionExporter(pcbnew.ActionPlugin):
             ok, err = self._try_drill_export(cli, gdir, str(bf))
             results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
-        # -- 丝印 PDF --
-        for side, cn in [("F", "顶层"), ("B", "底层")]:
-            key = f"{cn}丝印图 (PDF)"
-            if export_items.get(key, True):
-                step += 1; on_progress(step, f"正在导出{cn}丝印图...")
-                out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
-                is_bot = (side == "B")
-                cmd_enhanced = [cli, "pcb", "export", "pdf",
-                                "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                                "--black-and-white",
-                                *(["--mirror"] if is_bot else []),
-                                "-o", out, str(bf)]
-                cmd_base = [cli, "pcb", "export", "pdf",
-                            "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                            "-o", out, str(bf)]
-                ok, err = self._run_with_fallback(cmd_enhanced, cmd_base, f"{cn}丝印图")
-                results.append((key, ok, err))
+        # -- 丝印 PDF（顶层+底层合并） --
+        if export_items.get("丝印图 (PDF 顶层+底层)", True):
+            step += 1; on_progress(step, "正在导出丝印图(顶层+底层)...")
+            ok, err = self._export_silk_pdf(cli, sdir, project_name, str(bf))
+            results.append(("丝印图 (PDF 顶层+底层)", ok, err))
 
         # -- 坐标 --
         if export_items.get("坐标文件 (CSV)", True):
@@ -616,23 +606,11 @@ class ProductionExporter(pcbnew.ActionPlugin):
             ok, err = self._try_drill_export(cli, gdir, str(bf))
             results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
-        # -- 丝印 PDF --
-        for side, cn in [("F", "顶层"), ("B", "底层")]:
-            key = f"{cn}丝印图 (PDF)"
-            if export_items.get(key, True):
-                step += 1; on_progress(step, f"正在导出{cn}丝印图...")
-                out = os.path.join(sdir, f"{project_name}_{cn}丝印.pdf")
-                is_bot = (side == "B")
-                cmd_enhanced = [cli, "pcb", "export", "pdf",
-                                "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                                "--black-and-white",
-                                *(["--mirror"] if is_bot else []),
-                                "-o", out, str(bf)]
-                cmd_base = [cli, "pcb", "export", "pdf",
-                            "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
-                            "-o", out, str(bf)]
-                ok, err = self._run_with_fallback(cmd_enhanced, cmd_base, f"{cn}丝印图")
-                results.append((key, ok, err))
+        # -- 丝印 PDF（顶层+底层合并） --
+        if export_items.get("丝印图 (PDF 顶层+底层)", True):
+            step += 1; on_progress(step, "正在导出丝印图(顶层+底层)...")
+            ok, err = self._export_silk_pdf(cli, sdir, project_name, str(bf))
+            results.append(("丝印图 (PDF 顶层+底层)", ok, err))
 
         # -- 坐标 --
         if export_items.get("坐标文件 (CSV)", True):
@@ -761,6 +739,110 @@ class ProductionExporter(pcbnew.ActionPlugin):
             self._show_error("导出失败", report)
         else:
             self._show_warning(f"导出完成 ({success}/{total})", report)
+
+    def _export_silk_pdf(self, cli: str, sdir: str, project_name: str,
+                         board_path: str) -> tuple[bool, str]:
+        """
+        导出丝印 PDF：顶层 + 底层合并为单个多页 PDF。
+        分别导出 F/B 两个单页 PDF，再合并为一个 PDF。
+        合并失败时保留顶层/底层两个独立 PDF 兜底。
+        """
+        out = os.path.join(sdir, f"{project_name}_丝印.pdf")
+        tmp_f = os.path.join(sdir, f"{project_name}_丝印_F_tmp.pdf")
+        tmp_b = os.path.join(sdir, f"{project_name}_丝印_B_tmp.pdf")
+        ok_all = True
+        errors = []
+
+        for side, tmp, is_bot in [("F", tmp_f, False), ("B", tmp_b, True)]:
+            try:
+                cmd_enhanced = [cli, "pcb", "export", "pdf",
+                                "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
+                                "--black-and-white",
+                                *(["--mirror"] if is_bot else []),
+                                "-o", tmp, board_path]
+                cmd_base = [cli, "pcb", "export", "pdf",
+                            "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
+                            "-o", tmp, board_path]
+                ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
+                                                  f"丝印{side}面")
+                if not ok:
+                    ok_all = False
+                    errors.append(f"{side}: {err}")
+            except Exception as e:
+                ok_all = False
+                errors.append(f"{side}: {e}")
+
+        result: tuple[bool, str]
+        if ok_all and os.path.exists(tmp_f) and os.path.exists(tmp_b):
+            merge_ok, merge_err = self._merge_pdfs([tmp_f, tmp_b], out)
+            if merge_ok:
+                result = (True, "")
+            else:
+                # 合并失败：保留独立文件并重命名为正式名称
+                final_f = os.path.join(sdir, f"{project_name}_顶层丝印.pdf")
+                final_b = os.path.join(sdir, f"{project_name}_底层丝印.pdf")
+                try:
+                    os.replace(tmp_f, final_f)
+                    os.replace(tmp_b, final_b)
+                    result = (True, "合并失败，已保留顶层/底层独立 PDF: " + merge_err)
+                except OSError as e:
+                    result = (False, f"合并失败且无法保留文件: {e}")
+        else:
+            result = (False, "; ".join(errors) or "丝印 PDF 导出失败")
+
+        # 无论成败，务必删除残留的临时文件
+        for t in (tmp_f, tmp_b):
+            if os.path.exists(t):
+                try:
+                    os.remove(t)
+                except OSError:
+                    pass
+        return result
+
+    def _merge_pdfs(self, pdf_list: list, output: str) -> tuple[bool, str]:
+        """
+        将多个单页 PDF 合并为一个多页 PDF。
+        优先使用插件自带的 pypdf（bundled at plugins/lib/pypdf），
+        其次尝试环境中已装的 pypdf/PyPDF2，无需用户额外安装。
+        """
+        try:
+            # 定位插件根目录下的 lib/（bundled pypdf）
+            here = os.path.dirname(os.path.abspath(__file__))
+            libdir = os.path.join(here, "lib")
+            PdfWriter = PdfReader = None
+            if os.path.isdir(libdir):
+                saved_path = sys.path[:]
+                try:
+                    sys.path.insert(0, libdir)
+                    from pypdf import PdfWriter, PdfReader  # noqa
+                except ImportError:
+                    PdfWriter = PdfReader = None
+                finally:
+                    sys.path[:] = saved_path
+            if PdfWriter is None:
+                try:
+                    from pypdf import PdfWriter, PdfReader
+                except ImportError:
+                    try:
+                        from PyPDF2 import PdfWriter, PdfReader
+                    except ImportError:
+                        PdfWriter = PdfReader = None
+
+            if PdfWriter is not None:
+                writer = PdfWriter()
+                for p in pdf_list:
+                    if not os.path.exists(p):
+                        return False, f"缺少 PDF: {p}"
+                    reader = PdfReader(p)
+                    for page in reader.pages:
+                        writer.add_page(page)
+                with open(output, "wb") as f:
+                    writer.write(f)
+                return True, ""
+
+            return False, "合并 PDF 需要 pypdf 库（插件已内置，但加载失败）"
+        except Exception as e:
+            return False, f"PDF 合并失败: {e}"
 
     @staticmethod
     def _count_refs(refs: str) -> int:
