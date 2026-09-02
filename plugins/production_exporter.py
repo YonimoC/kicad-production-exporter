@@ -222,9 +222,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
             ]
         all_items.append(("3D STEP 模型", True))
 
-        # 构建自定义对话框
+        # 构建对话框：K8 老 wx 下若窗口太窄/无顶层 sizer，打开会很小、内容挤在上方，
+        # 需手动拉大。这里给足初始尺寸并按项目数估算舒适高度。
+        num_items = len(all_items)
+        dlg_h = min(680, 160 + num_items * 48)   # 项目数越多窗口越高
         dlg = wx.Dialog(None, title="选择导出项目",
-                        size=(380, 420),
+                        size=(380, dlg_h),
                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         panel = wx.Panel(dlg)
         vbox = wx.BoxSizer(wx.VERTICAL)
@@ -240,15 +243,16 @@ class ProductionExporter(pcbnew.ActionPlugin):
             cb = wx.CheckBox(panel, label=name)
             cb.SetValue(default)
             checkboxes.append(cb)
-            vbox.Add(cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 20)
+            vbox.Add(cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 16)
 
-        # 全选/全不选按钮
+        # 全选/全不选按钮（靠右）
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         btn_all = wx.Button(panel, label="全选")
         btn_none = wx.Button(panel, label="全不选")
+        btn_sizer.AddStretchSpacer()
         btn_sizer.Add(btn_all, 0, wx.RIGHT, 10)
         btn_sizer.Add(btn_none, 0)
-        vbox.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, 20)
+        vbox.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
 
         def on_select_all(e):
             for cb in checkboxes:
@@ -261,17 +265,21 @@ class ProductionExporter(pcbnew.ActionPlugin):
         btn_all.Bind(wx.EVT_BUTTON, on_select_all)
         btn_none.Bind(wx.EVT_BUTTON, on_select_none)
 
-        # 确定/取消
+        # 确定/取消（靠右，放最底）
         btn_ok = wx.Button(panel, wx.ID_OK, "确定")
         btn_cancel = wx.Button(panel, wx.ID_CANCEL, "取消")
         ok_sizer = wx.BoxSizer(wx.HORIZONTAL)
         ok_sizer.AddStretchSpacer()
         ok_sizer.Add(btn_ok, 0, wx.RIGHT, 10)
         ok_sizer.Add(btn_cancel, 0)
-        vbox.Add(ok_sizer, 0, wx.ALL | wx.EXPAND, 15)
+        vbox.Add(ok_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 14)
 
         panel.SetSizer(vbox)
-        dlg.Fit()
+        # 顶层 sizer：让 panel 铺满整个客户区，控件不会挤在角落
+        top = wx.BoxSizer(wx.VERTICAL)
+        top.Add(panel, 1, wx.EXPAND)
+        dlg.SetSizer(top)
+        dlg.SetSize((380, dlg_h))
         dlg.CenterOnScreen()
 
         if dlg.ShowModal() != wx.ID_OK:
@@ -299,17 +307,36 @@ class ProductionExporter(pcbnew.ActionPlugin):
         dlg.Destroy()
         return None
 
+    def _get_parent_window(self):
+        """找到 KiCad 顶层主窗口作为父窗口。
+
+        若无父窗口，弹出的 wx.MessageBox 可能显示在 KiCad 主界面后面，
+        让用户误以为软件假死。传入父窗口后提示框会置前并相对该窗口模态弹出。
+        """
+        try:
+            app = wx.GetApp()
+            if app is not None:
+                top = app.GetTopWindow()
+                if top is not None and not top.IsBeingDeleted():
+                    return top
+            for w in wx.GetTopLevelWindows():
+                if isinstance(w, wx.Frame) and w.IsShown() and not w.IsBeingDeleted():
+                    return w
+        except Exception:
+            pass
+        return None
+
     def _show_info(self, title: str, message: str):
-        """信息提示框。"""
-        wx.MessageBox(message, title, wx.OK | wx.ICON_INFORMATION)
+        """信息提示框（带父窗口，置前显示）。"""
+        wx.MessageBox(message, title, wx.OK | wx.ICON_INFORMATION, self._get_parent_window())
 
     def _show_error(self, title: str, message: str):
-        """错误提示框。"""
-        wx.MessageBox(message, title, wx.OK | wx.ICON_ERROR)
+        """错误提示框（带父窗口，置前显示）。"""
+        wx.MessageBox(message, title, wx.OK | wx.ICON_ERROR, self._get_parent_window())
 
     def _show_warning(self, title: str, message: str):
-        """警告提示框。"""
-        wx.MessageBox(message, title, wx.OK | wx.ICON_WARNING)
+        """警告提示框（带父窗口，置前显示）。"""
+        wx.MessageBox(message, title, wx.OK | wx.ICON_WARNING, self._get_parent_window())
 
     def _get_logger(self, output_root: str):
         """返回一个日志函数，写入用户主目录下的固定 log 文件（不污染导出目录）。"""
@@ -666,23 +693,23 @@ class ProductionExporter(pcbnew.ActionPlugin):
         flag = "-o" if is_v8 else "--output"
         log = self._get_logger(output_root)
 
-        # QUANTITY/DNP 是 KiCad 内置字段（K8+ 均支持），配合 --group-by 自动按分组计数
-        # 注意：不在 CLI 中排序，由 Python 读取 CSV 后按 DNP 排序
+        # QUANTITY 由 KiCad 按 --group-by 分组自动统计（列名 Qty）。数量只用 KiCad
+        # 原生输出的原始值，绝不自行按位号数去猜。
         ok, err = self._try_cmd(
             [cli, "sch", "export", "bom",
              "--fields", "Reference,Value,Footprint,QUANTITY,Description,PartNumber,DNP",
              "--labels", "Refs,Value,Footprint,Qty,Description,PartNumber,DNP",
-             "--group-by", "Value,Footprint,DNP",
+             "--group-by", "Description,Value,Footprint,DNP",  # 主要按描述(Description)分组，避免不同料被合并
              flag, bom_csv, str(sch)],
             "BOM 导出")
         log(f"BOM 主命令: ok={ok}, err={err}, csv_exists={os.path.exists(bom_csv)}")
         if not ok or not os.path.exists(bom_csv):
-            # 备选1: 不带 QUANTITY/DNP，靠 _count_refs 手动计算
+            # 备选1: 部分老版本不支持 QUANTITY 虚拟字段时的降级命令（仍不带自算）
             ok2, err2 = self._try_cmd(
                 [cli, "sch", "export", "bom",
                  "--fields", "Reference,Value,Footprint,Description,PartNumber",
                  "--labels", "Refs,Value,Footprint,Description,PartNumber",
-                 "--group-by", "Value,Footprint",
+                 "--group-by", "Description,Value,Footprint",  # 主要按描述分组
                  flag, bom_csv, str(sch)],
                 "BOM 导出(备选1)")
             log(f"BOM 备选1: ok={ok2}, err={err2}, csv_exists={os.path.exists(bom_csv)}")
@@ -753,15 +780,22 @@ class ProductionExporter(pcbnew.ActionPlugin):
         ok_all = True
         errors = []
 
+        # --scale 自动缩放（让板框内容铺满页面、自适应大小），仅 KiCad 9+ 支持；
+        # KiCad 8 不支持该参数，若传入会报 "Unknown argument: --scale"，故跳过。
+        kicad_ver = detect_kicad_version()
+        scale_args = ["--scale", "0"] if kicad_ver[0] >= 9 else []
+
         for side, tmp, is_bot in [("F", tmp_f, False), ("B", tmp_b, True)]:
             try:
                 cmd_enhanced = [cli, "pcb", "export", "pdf",
                                 "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
                                 "--black-and-white",
+                                *scale_args,
                                 *(["--mirror"] if is_bot else []),
                                 "-o", tmp, board_path]
                 cmd_base = [cli, "pcb", "export", "pdf",
                             "-l", f"{side}.Paste,{side}.Silkscreen,{side}.Mask,Edge.Cuts",
+                            *scale_args,
                             "-o", tmp, board_path]
                 ok, err = self._run_with_fallback(cmd_enhanced, cmd_base,
                                                   f"丝印{side}面")
@@ -867,18 +901,51 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 total += 1
         return total
 
+    @staticmethod
+    def _expand_ref_ranges(refs: str) -> str:
+        """把位号里的连续范围展开为逐个位号。
+
+        例: "D2-D5" → "D2,D3,D4,D5"；"R1,R3,R5-R7" → "R1,R3,R5,R6,R7"。
+        兼容半角 '-' 与全角 '–'/'—'；非范围部分原样保留、顺序不变。
+        """
+        if not refs:
+            return refs
+        out = []
+        for part in refs.replace("\u2013", "-").replace("\u2014", "-").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r"^([A-Za-z]*)(\d+)\s*-\s*([A-Za-z]*)(\d+)$", part)
+            if m and m.group(1) == m.group(3):
+                lo = int(m.group(2))
+                hi = int(m.group(4))
+                prefix = m.group(1)
+                if hi > lo:
+                    for n in range(lo, hi + 1):
+                        out.append(f"{prefix}{n}")
+                    continue
+            out.append(part)
+        return ",".join(out)
+
     def _generate_bom_xlsx(self, csv_path: str, xlsx_path: str) -> tuple:
         """
-        KiCad 内置 BOM 生成器已按 Value+Footprint 分组。
+        KiCad 内置 BOM 生成器已按分组。
         本方法只需重整列为: PartNumber | Description | Quantity | Designator | Value | Footprint
         返回 (成功, 错误信息)。
         """
         try:
-            import openpyxl
             import csv as csv_mod
+            # 优先加载插件内置的 openpyxl（bundled at plugins/lib/openpyxl，含依赖 et_xmlfile），
+            # 其次使用 KiCad Python 环境已安装的版本，无需用户手动 pip install。
+            # 原理：把插件根目录的 lib/ 加入 sys.path，即可让 import openpyxl 命中内置副本。
+            here = os.path.dirname(os.path.abspath(__file__))
+            libdir = os.path.join(here, "lib")
+            if os.path.isdir(libdir) and libdir not in sys.path:
+                sys.path.insert(0, libdir)
+            import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment
         except ImportError:
-            return False, "缺少 openpyxl 库，请在 KiCad Python 环境中安装: pip install openpyxl"
+            return False, "缺少 openpyxl 库（插件内置加载失败），请在 KiCad Python 环境中安装: pip install openpyxl"
 
         try:
             with open(csv_path, "r", encoding="utf-8-sig") as f:
@@ -921,10 +988,11 @@ class ProductionExporter(pcbnew.ActionPlugin):
             for row in data_rows:
                 if not row or all(c == "" for c in row):
                     continue
-                refs = get(row, idx_ref)
-                # Qty 列可能不存在、为空、或为 0（K8 不支持 QUANTITY 字段）
-                raw_qty = get(row, idx_qty) if idx_qty >= 0 else ""
-                qty = raw_qty if raw_qty and raw_qty != "0" else str(self._count_refs(refs))
+                # 位号：展开连续范围(D2-D5 → D2,D3,D4,D5)，不做任何自行统计。
+                refs = self._expand_ref_ranges(get(row, idx_ref))
+                # 数量列：只保留 KiCad 导出的原始值，不做任何自行统计。
+                # 若 KiCad 输出里没有该列/为空，就保持原始空值，绝不靠位号去“猜”。
+                qty = get(row, idx_qty) if idx_qty >= 0 else ""
                 ws.append([
                     get(row, idx_pn),
                     get(row, idx_desc),
