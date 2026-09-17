@@ -103,6 +103,28 @@ def detect_kicad_version() -> tuple[int, int]:
     return _kicad_version_cache
 
 
+# 读取 metadata.json 失败时的兜底版本号（正常应从 metadata.json 读取）
+_PLUGIN_VERSION_FALLBACK = "1.1.7"
+
+
+def get_plugin_version() -> str:
+    """获取插件版本号：优先 metadata.json（单一来源），失败则用内置兜底值。"""
+    try:
+        import json
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        meta = os.path.join(root, "metadata.json")
+        with open(meta, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        versions = data.get("versions") or []
+        if versions:
+            v = str(versions[0].get("version", "")).strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return _PLUGIN_VERSION_FALLBACK
+
+
 class ProductionExporter(pcbnew.ActionPlugin):
     """一键导出生产文件插件"""
 
@@ -171,6 +193,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
             None,
             f"将导出以下内容到:\n{output_root}\n\n"
             f"{layer_summary}\n\n"
+            f"插件版本: v{get_plugin_version()}\n"
             f"检测版本: {mode}\n"
             f"选中项目 ({len(selected_names)}):\n"
             f"{items_str}\n\n"
@@ -185,6 +208,9 @@ class ProductionExporter(pcbnew.ActionPlugin):
 
         # ---- 5. 执行导出（带进度条）----
         selected_count = sum(1 for sel in export_items.values() if sel)
+        # “3D 视图”一个勾选项会导出顶层+底层两张图，进度总数按 2 计
+        if export_items.get("3D 视图 (PNG 顶层+底层)"):
+            selected_count += 1
         total = selected_count
         if total == 0:
             return
@@ -207,43 +233,73 @@ class ProductionExporter(pcbnew.ActionPlugin):
 
     def _select_export_items(self, kicad_ver: tuple) -> dict | None:
         """弹出导出项目选择对话框，返回 {项目名: 是否选中} 或 None（取消）。"""
-        # 定义所有可选导出项目
-        all_items = [
-            ("GERBER 文件", True),
-            ("钻孔文件 (PTH+NPTH)", True),
-            ("丝印图 (PDF 顶层+底层)", True),
-            ("坐标文件 (CSV)", True),
-            ("BOM 物料清单 (XLSX)", True),
+        # 分组定义：(组标题, [(项目名, 默认选中), ...])
+        # 3D 模型 与 3D 图片 分开，便于按需分别勾选；
+        # 3D 顶层/底层视图合并为一项（一起导出，无必要分开）。
+        groups = [
+            ("制造文件", [
+                ("GERBER 文件", True),
+                ("钻孔文件 (PTH+NPTH)", True),
+                ("丝印图 (PDF 顶层+底层)", True),
+                ("坐标文件 (CSV)", True),
+                ("BOM 物料清单 (XLSX)", True),
+            ]),
+            ("3D 模型", [
+                ("3D STEP 文件", True),
+            ]),
         ]
         if kicad_ver[0] >= 9:
-            all_items += [
-                ("3D 顶层视图 (PNG)", True),
-                ("3D 底层视图 (PNG)", True),
-            ]
-        all_items.append(("3D STEP 模型", True))
+            groups.append(("3D 图片", [
+                ("3D 视图 (PNG 顶层+底层)", True),
+            ]))
+        else:
+            groups.append(("3D 图片", []))
 
-        # 构建对话框：K8 老 wx 下若窗口太窄/无顶层 sizer，打开会很小、内容挤在上方，
-        # 需手动拉大。这里给足初始尺寸并按项目数估算舒适高度。
-        num_items = len(all_items)
-        dlg_h = min(680, 160 + num_items * 48)   # 项目数越多窗口越高
-        dlg = wx.Dialog(None, title="选择导出项目",
-                        size=(380, dlg_h),
+        ver_str = get_plugin_version()
+
+        # 对话框尺寸不写死：这里只给初始值，最终尺寸在下方按内容自动分配。
+        dlg = wx.Dialog(None,
+                        title=f"选择导出项目 - Production File Exporter v{ver_str}",
+                        size=(420, 480),
                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         panel = wx.Panel(dlg)
         vbox = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(panel, label="请选择要导出的项目：")
+        title = wx.StaticText(panel, label=f"请选择要导出的项目：   （插件版本 v{ver_str}）")
         title_font = title.GetFont()
         title_font.SetWeight(wx.FONTWEIGHT_BOLD)
         title.SetFont(title_font)
         vbox.Add(title, 0, wx.ALL, 10)
 
         checkboxes = []
-        for name, default in all_items:
-            cb = wx.CheckBox(panel, label=name)
-            cb.SetValue(default)
-            checkboxes.append(cb)
-            vbox.Add(cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 16)
+        all_items = []
+        for gi, (group_name, items) in enumerate(groups):
+            if gi:
+                # 组与组之间加一条分隔线，视觉上更清爽
+                vbox.Add(wx.StaticLine(panel), 0,
+                         wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            head = wx.StaticText(panel, label=group_name)
+            head_font = head.GetFont()
+            head_font.SetWeight(wx.FONTWEIGHT_BOLD)
+            head.SetFont(head_font)
+            vbox.Add(head, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
+
+            if not items:
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                row.AddSpacer(22)          # 子项相对组标题缩进
+                row.Add(wx.StaticText(panel, label="（需 KiCad 9+，当前版本不支持）"), 1)
+                vbox.Add(row, 0, wx.EXPAND | wx.TOP, 12)
+                continue
+
+            for name, default in items:
+                cb = wx.CheckBox(panel, label=name)
+                cb.SetValue(default)
+                checkboxes.append(cb)
+                all_items.append((name, default))
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                row.AddSpacer(22)          # 子项相对组标题缩进
+                row.Add(cb, 1)
+                vbox.Add(row, 0, wx.EXPAND | wx.TOP, 12)
 
         # 全选/全不选按钮（靠右）
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -275,11 +331,23 @@ class ProductionExporter(pcbnew.ActionPlugin):
         vbox.Add(ok_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 14)
 
         panel.SetSizer(vbox)
-        # 顶层 sizer：让 panel 铺满整个客户区，控件不会挤在角落
+        # 顶层 sizer：让 panel 铺满整个客户区
         top = wx.BoxSizer(wx.VERTICAL)
         top.Add(panel, 1, wx.EXPAND)
         dlg.SetSizer(top)
-        dlg.SetSize((380, dlg_h))
+
+        # 窗口大小完全按内容自动分配（不写死像素值）：
+        # 内容所需最小尺寸 + 标题栏/边框 = 合适尺寸；
+        # 同时设为最小尺寸，避免手动缩小后把各项挤压到显示不全。
+        chrome_w = dlg.GetSize().GetWidth() - dlg.GetClientSize().GetWidth()
+        chrome_h = dlg.GetSize().GetHeight() - dlg.GetClientSize().GetHeight()
+        chrome_w = max(chrome_w, 16)    # 取不到时用保守估计
+        chrome_h = max(chrome_h, 40)
+        content_w, content_h = vbox.GetMinSize()
+        need_w = content_w + chrome_w
+        need_h = content_h + chrome_h
+        dlg.SetMinSize((need_w, need_h))
+        dlg.SetSize((need_w, need_h))
         dlg.CenterOnScreen()
 
         if dlg.ShowModal() != wx.ID_OK:
@@ -388,6 +456,15 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 if 'Library table' in line_stripped and ('UNINITIALIZED' in line_stripped or 'skipping' in line_stripped):
                     warn_lines.append(line_stripped)
                     continue
+                # 跳过全局库表加载失败的报错。
+                # 这类报错来自本机 KiCad 配置/安全软件（透明加密）环境，与导出产物无关，
+                # 且 kicad-cli 常常在报出它之后仍能正常写出文件，故不作致命错误处理。
+                _low = line_stripped.lower()
+                if ('library table' in _low
+                        or 'please edit this global' in _low
+                        or "expecting '('" in _low):
+                    warn_lines.append(line_stripped)
+                    continue
                 real_errors.append(line_stripped)
 
             if not real_errors and warn_lines:
@@ -469,6 +546,302 @@ class ProductionExporter(pcbnew.ActionPlugin):
             "Edge.Cuts",
         ])
         return ",".join(layers)
+
+    # ================================================================
+    #  3D 模型路径解析 / STEP 导出
+    # ================================================================
+
+    @staticmethod
+    def _kicad_install_3dmodels_dir(cli: str):
+        """由 kicad-cli 路径推断当前 KiCad 自带的 3D 模型库目录。"""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(cli)))
+        except Exception:
+            return None
+        for sub in (("share", "kicad", "3dmodels"),
+                    ("share", "kicad", "modules", "packages3d")):
+            p = os.path.join(root, *sub)
+            if os.path.isdir(p):
+                return p
+        return None
+
+    @staticmethod
+    def _kicad_config_env_vars() -> dict:
+        """读取各 KiCad 版本 kicad_common.json 里配置的环境变量（Configure Paths）。"""
+        out = {}
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return out
+        base = os.path.join(appdata, "kicad")
+        if not os.path.isdir(base):
+            return out
+        try:
+            import json
+            for ver in os.listdir(base):
+                cfg = os.path.join(base, ver, "kicad_common.json")
+                if not os.path.isfile(cfg):
+                    continue
+                try:
+                    with open(cfg, "r", encoding="utf-8-sig", errors="replace") as f:
+                        data = json.load(f)
+                    vars_ = (data.get("environment") or {}).get("vars") or {}
+                    if isinstance(vars_, dict):
+                        for k, v in vars_.items():
+                            if v:
+                                out.setdefault(k, v)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _extract_models(board_text: str) -> list:
+        """提取板文件中所有 (model "...") 的路径。"""
+        return re.findall(r'\(model\s+"([^"]+)"', board_text)
+
+    def _resolve_model_vars(self, models: list, models_dir) -> tuple[dict, list]:
+        """解析 3D 模型路径中的 ${VAR}，返回 (已解析变量表, 未解析变量名列表)。
+
+        解析顺序：进程环境变量 → KiCad 配置 → 当前 KiCad 自带 3D 模型库
+        （用于 KICAD<n>_3DMODEL_DIR 这类带版本号的旧变量）→ 依据板内绝对路径
+        的父目录做回退匹配（例如 ${KICAD_3RD_PARTY} 这类自定义变量）。
+        """
+        refs = {}
+        for m in models:
+            for var in re.findall(r"\$\{([^}]+)\}", m):
+                rest = m.split("${" + var + "}", 1)[1].lstrip("/\\").replace("\\", "/")
+                refs.setdefault(var, set()).add(rest)
+        if not refs:
+            return {}, []
+
+        lookup = dict(self._kicad_config_env_vars())
+        lookup.update({k: v for k, v in os.environ.items() if v})
+
+        resolved = {}
+        for var in refs:
+            if lookup.get(var):
+                resolved[var] = lookup[var]
+            elif models_dir and re.fullmatch(r"KICAD\d*_3DMODEL_DIR", var):
+                # 旧工程常用旧版本变量名（如 KICAD8_3DMODEL_DIR），
+                # 在新版 KiCad 下不会自动定义，这里映射到当前版本的模型库。
+                resolved[var] = models_dir
+
+        # 回退：用板内绝对路径的各级父目录去试配相对子路径
+        roots = []
+        for m in models:
+            if "${" in m:
+                continue
+            d = os.path.dirname(os.path.normpath(m))
+            for _ in range(6):
+                if not d or d in roots:
+                    break
+                roots.append(d)
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
+
+        unresolved = []
+        for var, subs in refs.items():
+            if resolved.get(var):
+                continue
+            found = None
+            for sub in sorted(subs):
+                for root in roots:
+                    cand = os.path.join(root, *sub.split("/"))
+                    if os.path.exists(cand) or (
+                        cand.lower().endswith(".wrl") and os.path.exists(cand[:-4] + ".step")
+                    ):
+                        found = root
+                        break
+                if found:
+                    break
+            if found:
+                resolved[var] = found
+            else:
+                unresolved.append(var)
+        return resolved, sorted(set(unresolved))
+
+    def _run_step(self, cmd: list, desc: str) -> tuple[bool, str, str]:
+        """执行 STEP 导出命令，返回 (是否零退出, 简述, 完整输出)。
+
+        不走 _try_cmd：STEP 导出需要看原始输出才能定位“没生成文件”的原因。
+        """
+        print(f"[ProductionExporter] 命令: {' '.join(cmd)}")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                               creationflags=_CREATE_FLAGS)
+        except FileNotFoundError:
+            return False, "找不到 kicad-cli", ""
+        except subprocess.TimeoutExpired:
+            return False, f"{desc} 超时", ""
+        except Exception as e:
+            return False, str(e)[:200], ""
+        output = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        return r.returncode == 0, f"返回码 {r.returncode}", output
+
+    @staticmethod
+    def _step_noise_lines(output: str, limit: int = 4) -> str:
+        """从输出里挑出有用的错误行（滤掉库表噪音与普通警告）。"""
+        picked = []
+        for line in (output or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            low = s.lower()
+            if ("library table" in low or "please edit this global" in low
+                    or "expecting '('" in low):
+                continue
+            if "warning" in low or "警告" in low:
+                continue
+            picked.append(s)
+        return " | ".join(picked[-limit:])[:200]
+
+    def _export_step(self, cli: str, sdir: str, project_name: str,
+                     board_path: str) -> tuple[bool, str]:
+        """导出 3D STEP：解析 ${VAR}，并把找不到的 .wrl 引用改写为同名 .step。
+
+        背景：KiCad 9+ 的 3D 模型库只提供 .step（不再提供 .wrl），而旧工程里的
+        模型引用多为 ${KICADn_3DMODEL_DIR}/xxx.wrl。此时既要解析变量，也要把
+        .wrl 改写为确实存在的同名 .step，否则这些封装在 STEP 里会整体丢失。
+        """
+        out_step = os.path.join(sdir, f"{project_name}_3D.step")
+        models_dir = self._kicad_install_3dmodels_dir(cli)
+
+        try:
+            with open(board_path, "r", encoding="utf-8", errors="replace") as f:
+                board_text = f.read()
+        except OSError as e:
+            a_ok, a_err, output = self._run_step(
+                [cli, "pcb", "export", "step", "--force", "-o", out_step, board_path],
+                "3D STEP 模型")
+            try:
+                if os.path.getsize(out_step) >= 100:
+                    return True, ""
+            except OSError:
+                pass
+            return False, (self._step_noise_lines(output)
+                           or f"读取板文件失败: {e}")[:200]
+
+        models = self._extract_models(board_text)
+        resolved, unresolved = self._resolve_model_vars(models, models_dir)
+        print(f"[ProductionExporter] 3D 模型变量: {resolved} | 未解析: {unresolved}")
+
+        def subst(path: str) -> str:
+            p = path
+            for var, val in resolved.items():
+                p = p.replace("${" + var + "}", val)
+            return p
+
+        rewrote = 0
+
+        def repl(match):
+            nonlocal rewrote
+            path = match.group(1)
+            if not path.lower().endswith(".wrl"):
+                return match.group(0)
+            if os.path.exists(subst(path)[:-4] + ".step"):
+                rewrote += 1
+                return '(model "%s"' % (path[:-4] + ".step")
+            return match.group(0)
+
+        new_text = re.sub(r'\(model\s+"([^"]+)"', repl, board_text)
+
+        tmp_board = None
+        cmd_board = board_path
+        if new_text != board_text:
+            # 优先与原板放在同一目录：该位置 kicad-cli 已验证可读，
+            # 可规避本机安全软件（透明加密）对系统临时目录的额外限制。
+            bdir = os.path.dirname(os.path.abspath(board_path))
+            stem = os.path.splitext(os.path.basename(board_path))[0]
+            same_dir = os.path.join(bdir, f"{stem}_pe_step_tmp.kicad_pcb")
+            try:
+                with open(same_dir, "w", encoding="utf-8") as f:
+                    f.write(new_text)
+                tmp_board = same_dir
+                cmd_board = same_dir
+                print(f"[ProductionExporter] STEP: 临时板位置 = {same_dir}")
+            except OSError as e:
+                print(f"[ProductionExporter] STEP: 工程目录不可写({e})，改用系统临时目录")
+                try:
+                    import tempfile
+                    fd, tmp_board = tempfile.mkstemp(suffix=".kicad_pcb", prefix="pe_step_")
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(new_text)
+                    cmd_board = tmp_board
+                except OSError:
+                    tmp_board = None
+                    cmd_board = board_path
+        print(f"[ProductionExporter] STEP: 改写 {rewrote} 个 .wrl → .step")
+
+        # 先清掉旧产物：这样“文件存在”才确实代表本次导出成功
+        try:
+            if os.path.exists(out_step):
+                os.remove(out_step)
+        except OSError:
+            pass
+
+        def produced() -> bool:
+            """STEP 是否真的写出来了（以此为准，而非仅看退出码）。"""
+            try:
+                return os.path.getsize(out_step) >= 100
+            except OSError:
+                return False
+
+        def build(target: str, subst_models: bool, define_vars: bool) -> list:
+            cmd = [cli, "pcb", "export", "step", "--force"]
+            if subst_models:
+                cmd.append("--subst-models")
+            if define_vars:
+                for var, val in resolved.items():
+                    cmd += ["-D", f"{var}={val}"]
+            cmd += ["-o", out_step, target]
+            return cmd
+
+        # 依次尝试：改写板 → 去 subst-models → 不传变量 → 回退到原板（保证至少有产物）
+        attempts = [
+            (cmd_board, True, True, "3D STEP 模型"),
+            (cmd_board, False, True, "3D STEP 模型 (无 --subst-models)"),
+            (cmd_board, True, False, "3D STEP 模型 (不传变量)"),
+            (board_path, True, True, "3D STEP 模型 (原板兜底)"),
+        ]
+
+        ok, err, detail = False, "", ""
+        try:
+            for target, subst_models, define_vars, desc in attempts:
+                a_ok, a_err, output = self._run_step(
+                    build(target, subst_models, define_vars), desc)
+                # 唯一成功标准：STEP 确实写出来了。
+                # （kicad-cli 常因全局库表等本机环境问题报错或返回非零，但产物已生成；
+                #   反之也可能退出码为 0 却什么都没写，所以不能只看退出码。）
+                if produced():
+                    ok = True
+                    if not a_ok:
+                        print(f"[ProductionExporter] {desc}: {a_err}，但 STEP 已生成，视为成功")
+                    break
+                noise = self._step_noise_lines(output)
+                detail = f"{desc} {a_err}: {noise}" if noise else f"{desc} {a_err}: 未生成文件"
+                print(f"[ProductionExporter] {desc} 未生成 STEP（{a_err}）: {noise}")
+        finally:
+            if tmp_board:
+                try:
+                    os.remove(tmp_board)
+                except OSError:
+                    pass
+
+        exists = os.path.exists(out_step)
+        try:
+            size = os.path.getsize(out_step)
+        except OSError:
+            size = -1
+        print(f"[ProductionExporter] STEP 输出: {out_step} (存在={exists}, 大小={size})")
+
+        if not ok:
+            return False, (detail or "STEP 未生成")[:200]
+        if unresolved:
+            return True, f"未解析模型变量: {', '.join(unresolved)}"
+        return True, ""
 
     # ================================================================
     #  版本分离的导出方法
@@ -562,17 +935,14 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 results.append(("BOM 物料清单", False, "未找到原理图"))
 
         # -- 3D 视图 (K8 不支持) --
-        for key in ["3D 顶层视图 (PNG)", "3D 底层视图 (PNG)"]:
-            if export_items.get(key, True):
-                results.append((key, False, "需 KiCad 9+"))
+        if export_items.get("3D 视图 (PNG 顶层+底层)"):
+            results.append(("3D 视图 (PNG 顶层+底层)", False, "需 KiCad 9+"))
 
         # -- 3D STEP --
-        if export_items.get("3D STEP 模型", True):
-            step += 1; on_progress(step, "正在导出 3D STEP 模型...")
-            ok, err = run([cli, "pcb", "export", "step",
-                           "-o", os.path.join(sdir, f"{project_name}_3D.step"),
-                           str(bf)], "3D STEP 模型")
-            results.append(("3D STEP 模型", ok, err))
+        if export_items.get("3D STEP 文件", True):
+            step += 1; on_progress(step, "正在导出 3D STEP 文件...")
+            ok, err = self._export_step(cli, sdir, project_name, str(bf))
+            results.append(("3D STEP 文件", ok, err))
 
         self._print_summary(results, output_root)
 
@@ -656,10 +1026,9 @@ class ProductionExporter(pcbnew.ActionPlugin):
             else:
                 results.append(("BOM 物料清单", False, "未找到原理图"))
 
-        # -- 3D 视图 --
-        for side, cn in [("top", "顶层"), ("bottom", "底层")]:
-            key = f"3D {cn}视图 (PNG)"
-            if export_items.get(key, True):
+        # -- 3D 视图（顶层+底层，一个勾选项一起导出）--
+        if export_items.get("3D 视图 (PNG 顶层+底层)", True):
+            for side, cn in [("top", "顶层"), ("bottom", "底层")]:
                 step += 1; on_progress(step, f"正在导出3D{cn}视图...")
                 out = os.path.join(sdir, f"{project_name}_3D_{cn}.png")
                 ok, err = self._run_with_fallback(
@@ -670,15 +1039,13 @@ class ProductionExporter(pcbnew.ActionPlugin):
                             else f"B.Cu,B.Mask,B.Paste,B.Silkscreen,Edge.Cuts"),
                      "-o", out, str(bf)],
                     f"3D {cn}视图")
-                results.append((key, ok, err))
+                results.append((f"3D {cn}视图 (PNG)", ok, err))
 
         # -- 3D STEP --
-        if export_items.get("3D STEP 模型", True):
-            step += 1; on_progress(step, "正在导出 3D STEP 模型...")
-            ok, err = run([cli, "pcb", "export", "step",
-                           "-o", os.path.join(sdir, f"{project_name}_3D.step"),
-                           str(bf)], "3D STEP 模型")
-            results.append(("3D STEP 模型", ok, err))
+        if export_items.get("3D STEP 文件", True):
+            step += 1; on_progress(step, "正在导出 3D STEP 文件...")
+            ok, err = self._export_step(cli, sdir, project_name, str(bf))
+            results.append(("3D STEP 文件", ok, err))
 
         self._print_summary(results, output_root)
 
