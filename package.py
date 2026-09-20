@@ -16,26 +16,50 @@ from pathlib import Path
 
 
 def create_zip(source_dir: str, output_zip: str) -> str:
-    """创建符合 PCM 规范的 ZIP 包。"""
+    """创建符合 PCM 规范的 ZIP 包。
+
+    包含：根级文件（metadata.json）、plugins/ 与 resources/ 全部内容。
+    注意 plugins/lib/ 是内嵌依赖（openpyxl / et_xmlfile / pypdf），必须一并打包，
+    否则 BOM 转 XLSX 与丝印 PDF 合并会失效。
+    另外提醒：KiCad PCM 安装时只安装 plugins/ 与 resources/ 两棵目录树，
+    放在 zip 根目录的文件不会被安装，因此随插件携带的资源（如工艺要求模板）
+    必须放在 plugins/ 或 resources/ 下。
+    """
     source = Path(source_dir)
     output = Path(output_zip)
 
-    files_to_pack = [
-        ("metadata.json", source / "metadata.json"),
-        ("plugins/__init__.py", source / "plugins" / "__init__.py"),
-        ("plugins/production_exporter.py", source / "plugins" / "production_exporter.py"),
-        ("plugins/icon.png", source / "plugins" / "icon.png"),
-        ("plugins/requirements.txt", source / "plugins" / "requirements.txt"),
-        ("resources/icon.png", source / "resources" / "icon.png"),
-    ]
+    root_files = ["metadata.json"]
+    pack_dirs = ["plugins", "resources"]
+    skip_dirs = {"__pycache__", ".git"}
 
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
-        for arcname, filepath in files_to_pack:
-            if filepath.exists():
-                zf.write(filepath, arcname)
-                print(f"  ✓ 添加: {arcname}")
+    def iter_entries():
+        for name in root_files:
+            p = source / name
+            if p.is_file():
+                print(f"  ✓ 添加: {name}")
+                yield name, p
             else:
-                print(f"  ⚠ 跳过: {arcname} (文件不存在)")
+                print(f"  ⚠ 跳过: {name} (文件不存在)")
+        for d in pack_dirs:
+            base = source / d
+            if not base.is_dir():
+                print(f"  ⚠ 跳过: {d}/ (目录不存在)")
+                continue
+            for root, subdirs, files in os.walk(base):
+                subdirs[:] = [s for s in subdirs if s not in skip_dirs]
+                for f in sorted(files):
+                    if f.endswith(".pyc"):
+                        continue
+                    p = Path(root) / f
+                    yield p.relative_to(source).as_posix(), p
+
+    count = 0
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, filepath in iter_entries():
+            zf.write(filepath, arcname)
+            count += 1
+
+    print(f"  ✓ 共写入 {count} 个文件")
 
     # 计算 SHA256
     sha256 = hashlib.sha256(output.read_bytes()).hexdigest()

@@ -1,6 +1,6 @@
 # Production File Exporter - KiCad 生产文件一键导出插件
 
-> 版本 **1.1.7** · 兼容 **KiCad 8.0 ~ 11**（SWIG Action Plugin）
+> 版本 **1.1.8** · 兼容 **KiCad 8.0 ~ 11**（SWIG Action Plugin）
 
 ## 功能
 
@@ -10,10 +10,11 @@
 |--------|----------|------|
 | GERBER 文件 | `XXX_Gerber/` | 全部铜层（含内层）+ F/B.Paste、F/B.Silkscreen、F/B.Mask、Edge.Cuts |
 | 钻孔文件 | `XXX_Gerber/` | Excellon 格式，PTH / NPTH 分离 |
+| PCB 加工工艺要求 (XLSX) | `XXX_Gerber/XXX_PCB加工工艺要求.xlsx` | 把随插件携带的模板复制过去，文件名前缀同步改为项目名（**默认勾选**） |
 | 丝印图 (PDF) | `XXX_丝印与3D图/XXX_丝印.pdf` | 顶层+底层合并为**单个多页 PDF**（含 Paste/Silkscreen/Mask/Edge.Cuts，底层自动镜像） |
 | 坐标文件 (CSV) | `XXX_坐标文件/XXX_坐标.csv` | Pick & Place，单位 mm |
 | BOM 物料清单 (XLSX) | `bom-XXX.xlsx` | 由原理图导出并格式化为 XLSX，DNP 项排在后面 |
-| 3D STEP 文件 | `XXX_丝印与3D图/XXX_3D.step` | KiCad 8+ |
+| 3D STEP 文件 | `XXX_丝印与3D图/XXX_3D.step` | KiCad 8+；**默认不勾选**，需要时手动勾上 |
 | 3D 视图 (PNG) | `XXX_丝印与3D图/XXX_3D_顶层.png`、`XXX_3D_底层.png` | **仅 KiCad 9+**（走 `pcb render` 真 3D 渲染） |
 
 > `XXX` 为项目名称（自动从 PCB 文件名提取）
@@ -66,10 +67,11 @@ production-exporter/
 │   ├── icons/                         # 主题图标
 │   │   ├── icon-light.png
 │   │   └── icon-dark.png
-│   └── lib/                           # 内嵌依赖（随包发布，无需安装）
-│       ├── openpyxl/
-│       ├── et_xmlfile/
-│       └── pypdf/
+│   ├── lib/                           # 内嵌依赖（随包发布，无需安装）
+│   │   ├── openpyxl/
+│   │   ├── et_xmlfile/
+│   │   └── pypdf/
+│   └── XXX_PCB加工工艺要求.xlsx        # 工艺要求模板（随包发布，导出时复制并改名）
 ├── resources/
 │   └── icon.png                       # PCM 图标
 ├── metadata.json                      # PCM 包元数据
@@ -132,6 +134,7 @@ KiCad 9+ 的 3D 模型库**只提供 `.step`，不再提供 `.wrl`**，而旧工
 
 ## 版本历史
 
+- **1.1.8** — 新增「PCB 加工工艺要求」导出项（默认勾选，模板随插件携带，输出到 GERBER 文件夹并同步改为项目名）；3D STEP 改为默认不勾选
 - **1.1.7** — STEP 模型路径修复（环境变量解析 + `.wrl` → `.step` 改写）；主窗口显示版本号；导出项分组；窗口按内容自适应尺寸
 - **1.1.6** — 更换插件图标
 - **1.1.5** — BOM 按 Description 分组、位号范围展开（`D2-D5` → `D2,D3,D4,D5`）；内嵌 openpyxl

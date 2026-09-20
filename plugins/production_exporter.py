@@ -104,7 +104,7 @@ def detect_kicad_version() -> tuple[int, int]:
 
 
 # 读取 metadata.json 失败时的兜底版本号（正常应从 metadata.json 读取）
-_PLUGIN_VERSION_FALLBACK = "1.1.7"
+_PLUGIN_VERSION_FALLBACK = "1.1.8"
 
 
 def get_plugin_version() -> str:
@@ -240,12 +240,13 @@ class ProductionExporter(pcbnew.ActionPlugin):
             ("制造文件", [
                 ("GERBER 文件", True),
                 ("钻孔文件 (PTH+NPTH)", True),
+                ("PCB 加工工艺要求 (XLSX)", True),
                 ("丝印图 (PDF 顶层+底层)", True),
                 ("坐标文件 (CSV)", True),
                 ("BOM 物料清单 (XLSX)", True),
             ]),
             ("3D 模型", [
-                ("3D STEP 文件", True),
+                ("3D STEP 文件", False),     # 默认不勾选（按需导出）
             ]),
         ]
         if kicad_ver[0] >= 9:
@@ -265,11 +266,16 @@ class ProductionExporter(pcbnew.ActionPlugin):
         panel = wx.Panel(dlg)
         vbox = wx.BoxSizer(wx.VERTICAL)
 
+        # 统一间距：左右留白与竖向间距都用同一个值，各分组/各项的节奏保持一致，
+        # 避免出现“同一组里项目挤在一起、组之间却拉得很开”的情况。
+        PAD = 20        # 通用留白（左右 & 竖向间距）
+        INDENT = 40     # 子项相对分组标题的缩进
+
         title = wx.StaticText(panel, label=f"请选择要导出的项目：   （插件版本 v{ver_str}）")
         title_font = title.GetFont()
         title_font.SetWeight(wx.FONTWEIGHT_BOLD)
         title.SetFont(title_font)
-        vbox.Add(title, 0, wx.ALL, 10)
+        vbox.Add(title, 0, wx.LEFT | wx.RIGHT | wx.TOP, PAD)
 
         checkboxes = []
         all_items = []
@@ -277,18 +283,18 @@ class ProductionExporter(pcbnew.ActionPlugin):
             if gi:
                 # 组与组之间加一条分隔线，视觉上更清爽
                 vbox.Add(wx.StaticLine(panel), 0,
-                         wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+                         wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, PAD)
             head = wx.StaticText(panel, label=group_name)
             head_font = head.GetFont()
             head_font.SetWeight(wx.FONTWEIGHT_BOLD)
             head.SetFont(head_font)
-            vbox.Add(head, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
+            vbox.Add(head, 0, wx.LEFT | wx.RIGHT | wx.TOP, PAD)
 
             if not items:
                 row = wx.BoxSizer(wx.HORIZONTAL)
-                row.AddSpacer(22)          # 子项相对组标题缩进
+                row.AddSpacer(INDENT)
                 row.Add(wx.StaticText(panel, label="（需 KiCad 9+，当前版本不支持）"), 1)
-                vbox.Add(row, 0, wx.EXPAND | wx.TOP, 12)
+                vbox.Add(row, 0, wx.EXPAND | wx.RIGHT | wx.TOP, PAD)
                 continue
 
             for name, default in items:
@@ -297,9 +303,9 @@ class ProductionExporter(pcbnew.ActionPlugin):
                 checkboxes.append(cb)
                 all_items.append((name, default))
                 row = wx.BoxSizer(wx.HORIZONTAL)
-                row.AddSpacer(22)          # 子项相对组标题缩进
+                row.AddSpacer(INDENT)
                 row.Add(cb, 1)
-                vbox.Add(row, 0, wx.EXPAND | wx.TOP, 12)
+                vbox.Add(row, 0, wx.EXPAND | wx.RIGHT | wx.TOP, PAD)
 
         # 全选/全不选按钮（靠右）
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -308,7 +314,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         btn_sizer.AddStretchSpacer()
         btn_sizer.Add(btn_all, 0, wx.RIGHT, 10)
         btn_sizer.Add(btn_none, 0)
-        vbox.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
+        vbox.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, PAD)
 
         def on_select_all(e):
             for cb in checkboxes:
@@ -328,7 +334,7 @@ class ProductionExporter(pcbnew.ActionPlugin):
         ok_sizer.AddStretchSpacer()
         ok_sizer.Add(btn_ok, 0, wx.RIGHT, 10)
         ok_sizer.Add(btn_cancel, 0)
-        vbox.Add(ok_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 14)
+        vbox.Add(ok_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, PAD)
 
         panel.SetSizer(vbox)
         # 顶层 sizer：让 panel 铺满整个客户区
@@ -546,6 +552,49 @@ class ProductionExporter(pcbnew.ActionPlugin):
             "Edge.Cuts",
         ])
         return ",".join(layers)
+
+    # ================================================================
+    #  PCB 加工工艺要求（模板随插件携带，导出时复制到 GERBER 文件夹）
+    # ================================================================
+
+    _REQUIREMENT_TEMPLATE = "XXX_PCB加工工艺要求.xlsx"
+
+    def _find_requirement_template(self):
+        """查找随插件携带的工艺要求模板，返回路径或 None。
+
+        重要：KiCad PCM 安装插件时只会安装 zip 内的 plugins/ 与 resources/ 两棵目录树——
+        - zip 的 plugins/ 内容 → <3rdparty>/plugins/<id>/
+        - zip 的 resources/ 内容 → <3rdparty>/resources/<id>/
+        放在 zip 根目录的文件不会被安装，所以模板必须放在 plugins/ 下。
+        以下按“安装后 → 开发/手动安装”的顺序依次查找。
+        """
+        here = os.path.dirname(os.path.abspath(__file__))   # 插件目录（开发时为 repo/plugins）
+        parent = os.path.dirname(here)
+        for base in (
+            here,                                   # 安装后：与 production_exporter.py 同目录
+            os.path.join(here, "resources"),
+            parent,                                 # 开发/手动安装：包根目录
+            os.path.join(parent, "resources"),
+        ):
+            p = os.path.join(base, self._REQUIREMENT_TEMPLATE)
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _export_pcb_requirements(self, gdir: str, project_name: str) -> tuple[bool, str]:
+        """把工艺要求模板复制到 GERBER 文件夹，并把文件名前缀改为项目名。"""
+        import shutil
+        src = self._find_requirement_template()
+        if not src:
+            return False, f"未找到模板 {self._REQUIREMENT_TEMPLATE}（应随插件一起安装）"
+        dst = os.path.join(gdir, f"{project_name}_PCB加工工艺要求.xlsx")
+        try:
+            os.makedirs(gdir, exist_ok=True)
+            shutil.copy2(src, dst)
+        except OSError as e:
+            return False, f"复制工艺要求失败: {e}"
+        print(f"[ProductionExporter] PCB 加工工艺要求: {dst}")
+        return True, ""
 
     # ================================================================
     #  3D 模型路径解析 / STEP 导出
@@ -911,6 +960,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
             ok, err = self._try_drill_export(cli, gdir, str(bf))
             results.append(("钻孔文件 (PTH+NPTH)", ok, err))
 
+        # -- PCB 加工工艺要求（随 GERBER 一起交付） --
+        if export_items.get("PCB 加工工艺要求 (XLSX)", True):
+            step += 1; on_progress(step, "正在添加 PCB 加工工艺要求...")
+            ok, err = self._export_pcb_requirements(gdir, project_name)
+            results.append(("PCB 加工工艺要求 (XLSX)", ok, err))
+
         # -- 丝印 PDF（顶层+底层合并） --
         if export_items.get("丝印图 (PDF 顶层+底层)", True):
             step += 1; on_progress(step, "正在导出丝印图(顶层+底层)...")
@@ -1002,6 +1057,12 @@ class ProductionExporter(pcbnew.ActionPlugin):
             step += 1; on_progress(step, "正在导出钻孔文件...")
             ok, err = self._try_drill_export(cli, gdir, str(bf))
             results.append(("钻孔文件 (PTH+NPTH)", ok, err))
+
+        # -- PCB 加工工艺要求（随 GERBER 一起交付） --
+        if export_items.get("PCB 加工工艺要求 (XLSX)", True):
+            step += 1; on_progress(step, "正在添加 PCB 加工工艺要求...")
+            ok, err = self._export_pcb_requirements(gdir, project_name)
+            results.append(("PCB 加工工艺要求 (XLSX)", ok, err))
 
         # -- 丝印 PDF（顶层+底层合并） --
         if export_items.get("丝印图 (PDF 顶层+底层)", True):
